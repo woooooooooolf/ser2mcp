@@ -33,19 +33,26 @@ The steps below can be executed by a human or an AI agent to go from clone → b
 git clone https://github.com/woooooooooolf/ser2mcp.git
 cd ser2mcp
 
-# 2. Build the release binary
+# 2. Linux system dependency (Debian/Ubuntu only; skip on macOS/Windows)
+sudo apt-get install -y libudev-dev
+
+# 3. Build the release binary
 cargo build --release
 # Artifact: target/release/ser2mcp (ser2mcp.exe on Windows)
 
-# 3. Sanity check (optional): list local serial ports
+# 4. Sanity check (optional): list local serial ports
 cargo run --release --example loopback -- --list
 
-# 4. Register as an MCP server (see "Connecting to MCP Clients" below)
+# 5. Register as an MCP server (see "Connecting to MCP Clients" below)
 ```
 
 **Verify a successful install**: after registration, calling `uart_list_ports` should return the local port list (possibly an empty array); with TX-RX loopback hardware, data sent via `uart_exchange` should come back unchanged.
 
 ## Build & Test
+
+> **Linux users**: `serialport` needs `libudev` to enumerate USB port information.
+> Install it before building (Debian/Ubuntu: `sudo apt-get install -y libudev-dev`;
+> macOS / Windows need no extra dependency).
 
 ```bash
 cargo build --release   # build

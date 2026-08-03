@@ -32,19 +32,25 @@
 git clone https://github.com/woooooooooolf/ser2mcp.git
 cd ser2mcp
 
-# 2. 构建 release 二进制
+# 2. Linux 系统依赖（仅 Debian/Ubuntu 需要；macOS/Windows 跳过）
+sudo apt-get install -y libudev-dev
+
+# 3. 构建 release 二进制
 cargo build --release
 # 产物：target/release/ser2mcp（Windows 下为 ser2mcp.exe）
 
-# 3. 自检（可选）：枚举本机串口
+# 4. 自检（可选）：枚举本机串口
 cargo run --release --example loopback -- --list
 
-# 4. 注册为 MCP server（见下方「接入 MCP 客户端」）
+# 5. 注册为 MCP server（见下方「接入 MCP 客户端」）
 ```
 
 **验证安装成功**：注册后调用 `uart_list_ports` 应返回本机串口列表（可能为空数组）；若有 TX-RX 回环硬件，调用 `uart_exchange` 发送的数据应原样返回。
 
 ## 构建与测试
+
+> **Linux 用户注意**：`serialport` 枚举 USB 端口信息依赖 `libudev`，编译前需先安装
+> （Debian/Ubuntu：`sudo apt-get install -y libudev-dev`；macOS / Windows 无需额外依赖）。
 
 ```bash
 cargo build --release   # 构建

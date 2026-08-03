@@ -19,6 +19,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust 工具链
         run: rustup toolchain install stable --profile minimal
+      - name: 安装系统依赖 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: 格式检查 (fmt)
         run: cargo fmt --all --check
       - name: 静态检查 (clippy)
