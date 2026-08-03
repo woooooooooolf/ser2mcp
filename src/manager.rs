@@ -1,0 +1,500 @@
+//! 串口管理器：打开/配置/后台读线程/写/读取。
+//!
+//! 架构：
+//! ```text
+//! 串口 ──► 后台读线程(生产者) ──► RingBuf(有界环形缓冲) ──► uart_read/uart_exchange(消费者)
+//! ```
+//! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
+//! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
+//! - 所有写/读/配置操作经 `io_lock` 串行化，保证 AI 回合制调用下语义清晰。
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+
+use crate::ring::RingBuf;
+
+/// 默认内部参数（可用 `uart_open` / `uart_configure` 覆盖）。
+pub const DEFAULT_BAUDRATE: u32 = 115200;
+pub const DEFAULT_READ_TIMEOUT_MS: u64 = 100;
+pub const DEFAULT_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
+pub const DEFAULT_IDLE_MS: u64 = 300;
+pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
+pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+const READ_CHUNK: usize = 4096;
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// 规范化后的串口运行时配置。
+#[derive(Debug, Clone)]
+pub struct PortConfig {
+    pub baudrate: u32,
+    pub data_bits: DataBits,
+    pub parity: Parity,
+    pub stop_bits: StopBits,
+    pub flow_control: FlowControl,
+    pub read_timeout_ms: u64,
+    pub buffer_size: usize,
+}
+
+impl Default for PortConfig {
+    fn default() -> Self {
+        Self {
+            baudrate: DEFAULT_BAUDRATE,
+            data_bits: DataBits::Eight,
+            parity: Parity::None,
+            stop_bits: StopBits::One,
+            flow_control: FlowControl::None,
+            read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
+            buffer_size: DEFAULT_BUFFER_SIZE,
+        }
+    }
+}
+
+/// 解析校验：数据位（5-8）。
+pub fn parse_data_bits(v: u8) -> Result<DataBits, String> {
+    match v {
+        5 => Ok(DataBits::Five),
+        6 => Ok(DataBits::Six),
+        7 => Ok(DataBits::Seven),
+        8 => Ok(DataBits::Eight),
+        _ => Err(format!("data_bits 仅支持 5-8，收到 {v}")),
+    }
+}
+
+/// 解析校验：停止位（1 或 2）。
+pub fn parse_stop_bits(v: u8) -> Result<StopBits, String> {
+    match v {
+        1 => Ok(StopBits::One),
+        2 => Ok(StopBits::Two),
+        _ => Err(format!("stop_bits 仅支持 1 或 2，收到 {v}")),
+    }
+}
+
+/// 解析校验：校验位（none/even/odd）。
+pub fn parse_parity(s: &str) -> Result<Parity, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" => Ok(Parity::None),
+        "even" => Ok(Parity::Even),
+        "odd" => Ok(Parity::Odd),
+        _ => Err(format!("parity 仅支持 none/even/odd，收到 {s:?}")),
+    }
+}
+
+/// 解析校验：流控（none/software/hardware）。
+pub fn parse_flow_control(s: &str) -> Result<FlowControl, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" => Ok(FlowControl::None),
+        "software" | "xon_xoff" | "xon/xoff" => Ok(FlowControl::Software),
+        "hardware" | "rts_cts" | "rts/cts" => Ok(FlowControl::Hardware),
+        _ => Err(format!("flow_control 仅支持 none/software/hardware，收到 {s:?}")),
+    }
+}
+
+/// 解析校验：波特率（合理范围 50-4,000,000）。
+pub fn parse_baudrate(v: u32) -> Result<u32, String> {
+    if !(50..=4_000_000).contains(&v) {
+        return Err(format!("baudrate 超出合理范围 (50-4,000,000)，收到 {v}"));
+    }
+    Ok(v)
+}
+
+/// 串口信息（`uart_list_ports` 返回值）。
+#[derive(Debug, serde::Serialize)]
+pub struct PortInfo {
+    pub name: String,
+    pub port_type: String,
+    pub description: String,
+}
+
+/// 读取结果（`uart_read` / `uart_exchange` 返回值）。
+#[derive(Debug)]
+pub struct ReadOutcome {
+    pub data: Vec<u8>,
+    pub reason: ReadReason,
+    pub overflow_delta: u64,
+    pub overflow_total: u64,
+    pub buffered: usize,
+}
+
+/// 读取返回原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadReason {
+    /// 空闲判定：出现新数据且持续 idle_ms 无新字节（视为一次响应结束）。
+    Idle,
+    /// 未读字节数达到 max_bytes 上限（防缓冲堆积）。
+    MaxBytes,
+    /// 达到 timeout_ms 总超时（无数据或持续有数据但未空闲）。
+    Timeout,
+}
+
+/// 运行时状态快照（`uart_available` 返回值）。
+#[derive(Debug, serde::Serialize)]
+pub struct AvailableInfo {
+    pub open: bool,
+    pub port: Option<String>,
+    pub baudrate: Option<u32>,
+    pub data_bits: Option<u8>,
+    pub parity: Option<String>,
+    pub stop_bits: Option<u8>,
+    pub flow_control: Option<String>,
+    pub read_timeout_ms: Option<u64>,
+    pub buffer_size: Option<usize>,
+    pub buffered_bytes: usize,
+    pub overflow_total: u64,
+    pub read_error: Option<String>,
+}
+
+/// 活动串口连接（仅存在于 `SerialManager.inner` 的 Some 分支中）。
+struct ActivePort {
+    port: Arc<Mutex<Box<dyn SerialPort>>>,
+    config: PortConfig,
+    port_name: String,
+    buffer: Arc<RingBuf>,
+    stop: Arc<AtomicBool>,
+    reader: Option<JoinHandle<()>>,
+    read_error: Arc<Mutex<Option<String>>>,
+}
+
+/// 串口管理器。
+#[derive(Default)]
+pub struct SerialManager {
+    inner: Mutex<Option<ActivePort>>,
+    /// 串行化 write/read/configure 工具调用。
+    io_lock: tokio::sync::Mutex<()>,
+    /// 上次读取时的累计溢出计数（用于计算增量）。
+    last_overflow: Mutex<u64>,
+}
+
+impl SerialManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 枚举本机可用串口。
+    pub fn list_ports(&self) -> Result<Vec<PortInfo>, String> {
+        let ports = serialport::available_ports().map_err(|e| format!("枚举串口失败: {e}"))?;
+        Ok(ports
+            .into_iter()
+            .map(|p| PortInfo {
+                name: p.port_name,
+                port_type: match &p.port_type {
+                    serialport::SerialPortType::UsbPort(_info) => "usb".into(),
+                    serialport::SerialPortType::BluetoothPort => "bluetooth".into(),
+                    serialport::SerialPortType::PciPort => "pci".into(),
+                    serialport::SerialPortType::Unknown => "unknown".into(),
+                },
+                description: match &p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => format!(
+                        "vid={:04x} pid={:04x} serial={} product={}",
+                        info.vid,
+                        info.pid,
+                        info.serial_number.as_deref().unwrap_or(""),
+                        info.product.as_deref().unwrap_or("")
+                    ),
+                    _ => String::new(),
+                },
+            })
+            .collect())
+    }
+
+    /// 打开串口并启动后台读线程。若已有连接则先关闭。
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(
+        &self,
+        port_name: &str,
+        baudrate: u32,
+        data_bits: DataBits,
+        parity: Parity,
+        stop_bits: StopBits,
+        flow_control: FlowControl,
+        read_timeout_ms: u64,
+        buffer_size: usize,
+        discard_on_open: bool,
+    ) -> Result<(), String> {
+        // 先关闭已有连接（同步完成，无需 io_lock）。
+        self.close_sync();
+
+        let builder = serialport::new(port_name, baudrate);
+        let port = builder
+            .data_bits(data_bits)
+            .parity(parity)
+            .stop_bits(stop_bits)
+            .flow_control(flow_control)
+            .timeout(Duration::from_millis(read_timeout_ms))
+            .open()
+            .map_err(|e| format!("打开 {port_name} 失败: {e}"))?;
+
+        let port = Arc::new(Mutex::new(port));
+        if discard_on_open {
+            let guard = port.lock().unwrap();
+            let _ = guard.clear(serialport::ClearBuffer::Input);
+        }
+
+        let buffer = RingBuf::new(buffer_size);
+        let stop = Arc::new(AtomicBool::new(false));
+        let read_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        // 后台读线程：串口 → 环形缓冲。
+        let reader_port = port.clone();
+        let reader_buffer = buffer.clone();
+        let reader_stop = stop.clone();
+        let reader_error = read_error.clone();
+        let reader = std::thread::Builder::new()
+            .name("ser2mcp-reader".into())
+            .spawn(move || {
+                let mut chunk = [0u8; READ_CHUNK];
+                loop {
+                    if reader_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let n = {
+                        let mut guard = match reader_port.lock() {
+                            Ok(g) => g,
+                            Err(_) => break, // 锁中毒：直接退出
+                        };
+                        match guard.read(&mut chunk) {
+                            Ok(n) => n,
+                            Err(e) => match e.kind() {
+                                // 读超时/端口暂时忙：正常现象，继续循环
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                                    continue
+                                }
+                                // 致命错误：记录并退出读线程
+                                other => {
+                                    *reader_error.lock().unwrap() = Some(format!("{other}: {e}"));
+                                    break;
+                                }
+                            },
+                        }
+                    };
+                    if n > 0 {
+                        reader_buffer.push(&chunk[..n]);
+                    }
+                }
+            })
+            .map_err(|e| format!("启动读线程失败: {e}"))?;
+
+        let mut inner = self.inner.lock().unwrap();
+        *inner = Some(ActivePort {
+            port,
+            config: PortConfig {
+                baudrate,
+                data_bits,
+                parity,
+                stop_bits,
+                flow_control,
+                read_timeout_ms,
+                buffer_size,
+            },
+            port_name: port_name.to_string(),
+            buffer,
+            stop,
+            reader: Some(reader),
+            read_error,
+        });
+        *self.last_overflow.lock().unwrap() = 0;
+        Ok(())
+    }
+
+    /// 运行时重配置（仅更新传入的项）。
+    pub async fn configure(
+        &self,
+        baudrate: Option<u32>,
+        data_bits: Option<DataBits>,
+        parity: Option<Parity>,
+        stop_bits: Option<StopBits>,
+        flow_control: Option<FlowControl>,
+        read_timeout_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let _guard = self.io_lock.lock().await;
+        let mut inner = self.inner.lock().unwrap();
+        let ap = inner.as_mut().ok_or("串口未打开，请先调用 uart_open")?;
+        {
+            let mut port = ap.port.lock().unwrap();
+            if let Some(v) = baudrate {
+                port.set_baud_rate(v).map_err(|e| format!("设置波特率失败: {e}"))?;
+                ap.config.baudrate = v;
+            }
+            if let Some(v) = data_bits {
+                port.set_data_bits(v).map_err(|e| format!("设置数据位失败: {e}"))?;
+                ap.config.data_bits = v;
+            }
+            if let Some(v) = parity {
+                port.set_parity(v).map_err(|e| format!("设置校验位失败: {e}"))?;
+                ap.config.parity = v;
+            }
+            if let Some(v) = stop_bits {
+                port.set_stop_bits(v).map_err(|e| format!("设置停止位失败: {e}"))?;
+                ap.config.stop_bits = v;
+            }
+            if let Some(v) = flow_control {
+                port.set_flow_control(v).map_err(|e| format!("设置流控失败: {e}"))?;
+                ap.config.flow_control = v;
+            }
+            if let Some(v) = read_timeout_ms {
+                port.set_timeout(Duration::from_millis(v))
+                    .map_err(|e| format!("设置读超时失败: {e}"))?;
+                ap.config.read_timeout_ms = v;
+            }
+        }
+        Ok(())
+    }
+
+    /// 写入数据（只发不等），返回实际写入字节数。
+    pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
+        let _guard = self.io_lock.lock().await;
+        let inner = self.inner.lock().unwrap();
+        let ap = inner.as_ref().ok_or("串口未打开，请先调用 uart_open")?;
+        let mut port = ap.port.lock().unwrap();
+        let mut written = 0;
+        while written < data.len() {
+            let n = port
+                .write(&data[written..])
+                .map_err(|e| format!("写入失败: {e}"))?;
+            written += n;
+        }
+        port.flush().map_err(|e| format!("flush 失败: {e}"))?;
+        Ok(written)
+    }
+
+    /// 拉取缓冲：等待"空闲判定 / 达到 max_bytes / 超时"三者之一后返回全部未读数据。
+    pub async fn read(
+        &self,
+        idle_ms: u64,
+        max_bytes: usize,
+        timeout_ms: u64,
+    ) -> Result<ReadOutcome, String> {
+        let _guard = self.io_lock.lock().await;
+        let (buffer, _port_name) = {
+            let inner = self.inner.lock().unwrap();
+            let ap = inner.as_ref().ok_or("串口未打开，请先调用 uart_open")?;
+            (ap.buffer.clone(), ap.port_name.clone())
+        };
+        let idle = Duration::from_millis(idle_ms);
+        let timeout = Duration::from_millis(timeout_ms);
+        let start = Instant::now();
+
+        let reason = loop {
+            let (cur_len, _) = buffer.stats();
+            let age = buffer.last_write_age();
+            if cur_len > 0 && age >= idle {
+                break ReadReason::Idle;
+            }
+            if cur_len >= max_bytes {
+                break ReadReason::MaxBytes;
+            }
+            if start.elapsed() >= timeout {
+                break ReadReason::Timeout;
+            }
+            // 等待新数据或周期性复查
+            tokio::select! {
+                _ = buffer.notified() => {}
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            }
+        };
+
+        let (data, overflow_total) = buffer.take_all();
+        let mut last = self.last_overflow.lock().unwrap();
+        let overflow_delta = overflow_total.saturating_sub(*last);
+        *last = overflow_total;
+        let (buffered, _) = buffer.stats();
+
+        Ok(ReadOutcome {
+            data,
+            reason,
+            overflow_delta,
+            overflow_total,
+            buffered,
+        })
+    }
+
+    /// 运行状态快照。
+    pub fn available(&self) -> AvailableInfo {
+        let inner = self.inner.lock().unwrap();
+        match inner.as_ref() {
+            None => AvailableInfo {
+                open: false,
+                port: None,
+                baudrate: None,
+                data_bits: None,
+                parity: None,
+                stop_bits: None,
+                flow_control: None,
+                read_timeout_ms: None,
+                buffer_size: None,
+                buffered_bytes: 0,
+                overflow_total: 0,
+                read_error: None,
+            },
+            Some(ap) => {
+                let (buffered, overflow_total) = ap.buffer.stats();
+                let cfg = &ap.config;
+                AvailableInfo {
+                    open: true,
+                    port: Some(ap.port_name.clone()),
+                    baudrate: Some(cfg.baudrate),
+                    data_bits: Some(data_bits_to_u8(cfg.data_bits)),
+                    parity: Some(format!("{:?}", cfg.parity).to_lowercase()),
+                    stop_bits: Some(stop_bits_to_u8(cfg.stop_bits)),
+                    flow_control: Some(format!("{:?}", cfg.flow_control).to_lowercase()),
+                    read_timeout_ms: Some(cfg.read_timeout_ms),
+                    buffer_size: Some(cfg.buffer_size),
+                    buffered_bytes: buffered,
+                    overflow_total,
+                    read_error: ap.read_error.lock().unwrap().clone(),
+                }
+            }
+        }
+    }
+
+    /// 清空缓冲中的未读数据，返回清掉的字节数。
+    pub fn clear(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        match inner.as_ref() {
+            None => 0,
+            Some(ap) => {
+                let (bytes, _) = ap.buffer.stats();
+                ap.buffer.clear();
+                bytes
+            }
+        }
+    }
+
+    /// 关闭串口（异步：先停读线程并 join，再释放端口句柄）。
+    pub async fn close(&self) -> Result<(), String> {
+        self.close_sync();
+        Ok(())
+    }
+
+    fn close_sync(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(ap) = inner.take() {
+            ap.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = ap.reader {
+                // 读线程至多 read_timeout 内返回；此处短暂阻塞可接受。
+                let _ = handle.join();
+            }
+            // 读线程已退出，此处 drop ap 释放端口句柄（Windows 上安全）。
+        }
+        *self.last_overflow.lock().unwrap() = 0;
+    }
+}
+
+fn data_bits_to_u8(v: DataBits) -> u8 {
+    match v {
+        DataBits::Five => 5,
+        DataBits::Six => 6,
+        DataBits::Seven => 7,
+        DataBits::Eight => 8,
+    }
+}
+
+fn stop_bits_to_u8(v: StopBits) -> u8 {
+    match v {
+        StopBits::One => 1,
+        StopBits::Two => 2,
+    }
+}
