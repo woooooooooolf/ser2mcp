@@ -402,7 +402,7 @@ impl Ser2Mcp {
 impl ServerHandler for Ser2Mcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
+            .with_server_info(Implementation::new("ser2mcp", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(INSTRUCTIONS.to_string())
     }
