@@ -31,6 +31,15 @@ cargo build --release
 cargo test
 ```
 
+## 回环自测（真实硬件，TX-RX 短接）
+
+内置一键自测工具，枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：
+
+```bash
+cargo run --release --example loopback -- --list     # 枚举本机串口
+cargo run --release --example loopback -- COM3 115200 # 回环测试
+```
+
 ## 接入 MCP 客户端
 
 以 Reasonix / Claude Desktop 等支持 stdio MCP server 的客户端为例，注册命令指向编译产物即可：
@@ -98,16 +107,6 @@ cargo test
 3. uart_exchange {data: "41 54 0D 0A"}  → 发 "AT\r\n"，等回复
 4. uart_configure {baudrate: 9600}      → 设备切换波特率后重配置
 5. uart_close
-```
-
-## 回环自测（TX-RX 短接）
-
-硬件将 TX 与 RX 短接（回环），此时发送的内容会原样返回：
-
-```
-uart_open   {port: "COM3"}
-uart_exchange {data: "41 54 0D 0A", idle_ms: 300}
-→ 返回 data 应为 "41 54 0D 0A"（原样回显）
 ```
 
 ## 模块结构
