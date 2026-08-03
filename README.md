@@ -1,5 +1,8 @@
 # ser2mcp
 
+[![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
 **UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Reasonix、Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
 
 ```
@@ -24,7 +27,7 @@
 
 ```bash
 # 1. 拉取仓库
-git clone <repository-url> ser2mcp
+git clone https://github.com/woooooooooolf/ser2mcp.git
 cd ser2mcp
 
 # 2. 构建 release 二进制
