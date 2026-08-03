@@ -56,11 +56,13 @@ pub fn decode(s: &str) -> Result<Vec<u8>, String> {
                 chars.next();
             }
             other => {
-                return Err(format!("非法 hex 字符: {other:?}（仅允许 0-9 A-F a-f 及分隔符）"));
+                return Err(format!(
+                    "非法 hex 字符: {other:?}（仅允许 0-9 A-F a-f 及分隔符）"
+                ));
             }
         }
     }
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(format!(
             "hex 字符串长度必须为偶数（当前有效字符数 {}）",
             cleaned.len()
@@ -89,7 +91,9 @@ fn hex_val(b: u8) -> u8 {
 /// 全部字节位于可打印 ASCII（0x20..=0x7E）或合法 UTF-8 多字节序列时视为文本。
 pub fn is_text(bytes: &[u8]) -> bool {
     match std::str::from_utf8(bytes) {
-        Ok(s) => s.chars().all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t'),
+        Ok(s) => s
+            .chars()
+            .all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t'),
         Err(_) => false,
     }
 }

@@ -29,7 +29,10 @@ fn main() {
         None => {
             eprintln!("用法:");
             eprintln!("  {0} --list               # 枚举串口", args[0]);
-            eprintln!("  {0} COM3 [波特率]        # 回环测试（TX-RX 短接）", args[0]);
+            eprintln!(
+                "  {0} COM3 [波特率]        # 回环测试（TX-RX 短接）",
+                args[0]
+            );
             std::process::exit(2);
         }
     }
@@ -86,7 +89,12 @@ fn loopback(port: &str, baudrate: u32) {
 
     match outcome {
         Ok(o) => {
-            println!("收到 {} 字节, reason={:?}, overflow_delta={}", o.data.len(), o.reason, o.overflow_delta);
+            println!(
+                "收到 {} 字节, reason={:?}, overflow_delta={}",
+                o.data.len(),
+                o.reason,
+                o.overflow_delta
+            );
             if o.data.is_empty() {
                 eprintln!("FAIL: 3 秒内未收到任何数据（检查 TX-RX 是否短接/波特率是否匹配）");
                 std::process::exit(1);
@@ -94,8 +102,8 @@ fn loopback(port: &str, baudrate: u32) {
             // 校验：返回数据应包含发送内容（回环可能把发送内容原样回显，含开头）
             let sent_hex = &hex_payload;
             let recv_hex = hex::encode(&o.data);
-            let matched = recv_hex.len() >= sent_hex.len()
-                && recv_hex[..sent_hex.len()] == *sent_hex;
+            let matched =
+                recv_hex.len() >= sent_hex.len() && recv_hex[..sent_hex.len()] == *sent_hex;
             if matched {
                 println!("PASS: 回环数据与发送一致（前 {} 字节）", payload.len());
                 println!("发送: {sent_hex}");

@@ -1,6 +1,6 @@
-# ser2mcp — UART 串口 MCP 服务器
+# ser2mcp
 
-把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Reasonix、Claude Desktop、Cursor 等任何 MCP 客户端）直接读写串口。
+**UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Reasonix、Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
 
 ```
 ┌──────────────┐  JSON-RPC over stdio  ┌──────────────────┐  串口   ┌──────────┐
@@ -14,45 +14,61 @@
 - **9 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、状态、清缓冲、关闭
 - **完善的串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
 - **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`
-- **上行数据不丢不堵**：后台读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值里带 `overflow_delta / overflow_total`，数据缺口可检测
+- **上行数据不丢不堵**：后台读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本
-- **单二进制交付**：`cargo build --release` 产出单个 exe，Windows 上无需任何运行时
+- **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
 
-## 构建
+## 快速安装（AI 自动安装指南）
+
+以下步骤供人工或 AI 代理照此执行，即可完成拉取 → 构建 → 注册：
 
 ```bash
+# 1. 拉取仓库
+git clone <repository-url> ser2mcp
+cd ser2mcp
+
+# 2. 构建 release 二进制
 cargo build --release
-# 产物：target/release/ser2mcp.exe
+# 产物：target/release/ser2mcp（Windows 下为 ser2mcp.exe）
+
+# 3. 自检（可选）：枚举本机串口
+cargo run --release --example loopback -- --list
+
+# 4. 注册为 MCP server（见下方「接入 MCP 客户端」）
 ```
 
-测试（单元 + 端到端 MCP 协议测试，无需串口硬件）：
+**验证安装成功**：注册后调用 `uart_list_ports` 应返回本机串口列表（可能为空数组）；若有 TX-RX 回环硬件，调用 `uart_exchange` 发送的数据应原样返回。
+
+## 构建与测试
 
 ```bash
-cargo test
-```
-
-## 回环自测（真实硬件，TX-RX 短接）
-
-内置一键自测工具，枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：
-
-```bash
-cargo run --release --example loopback -- --list     # 枚举本机串口
-cargo run --release --example loopback -- COM3 115200 # 回环测试
+cargo build --release   # 构建
+cargo test              # 单元 + 端到端 MCP 协议测试（无需串口硬件）
+cargo doc --no-deps     # 生成 Rust 文档
 ```
 
 ## 接入 MCP 客户端
 
-以 Reasonix / Claude Desktop 等支持 stdio MCP server 的客户端为例，注册命令指向编译产物即可：
+MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json` / Claude Desktop 等）：
 
 ```json
 {
   "mcpServers": {
     "ser2mcp": {
-      "command": "C:\\tools\\ser2mcp.exe",
+      "command": "/absolute/path/to/ser2mcp",
       "args": []
     }
   }
 }
+```
+
+Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
+Reasonix 项目配置（`reasonix.toml`）示例：
+
+```toml
+[[plugins]]
+name    = "ser2mcp"
+command = "/absolute/path/to/ser2mcp"
 ```
 
 环境变量（可选）：
@@ -109,26 +125,37 @@ cargo run --release --example loopback -- COM3 115200 # 回环测试
 5. uart_close
 ```
 
+## 回环自测（真实硬件，TX-RX 短接）
+
+内置一键自测工具：枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：
+
+```bash
+cargo run --release --example loopback -- --list     # 枚举本机串口
+cargo run --release --example loopback -- COM3 115200 # 回环测试
+```
+
 ## 模块结构
 
 ```
 src/
 ├── main.rs      # 入口：stdio 传输启动
-├── lib.rs       # 模块声明
+├── lib.rs       # crate 文档与模块声明
 ├── hex.rs       # hex 编解码（hex/text 双模式）
 ├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒）
 ├── manager.rs   # 串口管理器（打开/重配置/后台读线程/写/拉取）
 └── server.rs    # MCP 工具层（9 个工具 + ServerHandler）
 tests/
 └── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手）
+examples/
+└── loopback.rs  # 回环自测工具
 ```
 
 ## 技术栈
 
-- [rmcp 3.x](https://github.com/modelcontextprotocol/rust-sdk)（官方 Rust MCP SDK）
-- [serialport 4.9](https://crates.io/crates/serialport)
+- [rmcp](https://github.com/modelcontextprotocol/rust-sdk)（官方 Rust MCP SDK）
+- [serialport](https://crates.io/crates/serialport)
 - tokio / serde / schemars
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0（见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)）

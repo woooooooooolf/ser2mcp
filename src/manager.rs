@@ -17,12 +17,17 @@ use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::ring::RingBuf;
 
-/// 默认内部参数（可用 `uart_open` / `uart_configure` 覆盖）。
+/// 默认波特率（115200）。
 pub const DEFAULT_BAUDRATE: u32 = 115200;
+/// 默认串口读超时（毫秒），也是读线程的最长阻塞时间。
 pub const DEFAULT_READ_TIMEOUT_MS: u64 = 100;
+/// 默认上行环形缓冲大小（1 MiB），写满覆盖最旧数据并计数溢出。
 pub const DEFAULT_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
+/// 默认空闲判定阈值（毫秒）：出现新数据后持续该时长无新字节视为一次响应结束。
 pub const DEFAULT_IDLE_MS: u64 = 300;
+/// 默认单次拉取触发上限（64 KiB）：未读字节数达到该值立即返回。
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
+/// 默认总等待超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const READ_CHUNK: usize = 4096;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -30,12 +35,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// 规范化后的串口运行时配置。
 #[derive(Debug, Clone)]
 pub struct PortConfig {
+    /// 波特率（bps）。
     pub baudrate: u32,
+    /// 数据位（5-8）。
     pub data_bits: DataBits,
+    /// 校验位。
     pub parity: Parity,
+    /// 停止位（1 或 2）。
     pub stop_bits: StopBits,
+    /// 流控方式。
     pub flow_control: FlowControl,
+    /// 读线程的串口读超时（毫秒）。
     pub read_timeout_ms: u64,
+    /// 上行环形缓冲大小（字节）。
     pub buffer_size: usize,
 }
 
@@ -89,7 +101,9 @@ pub fn parse_flow_control(s: &str) -> Result<FlowControl, String> {
         "none" => Ok(FlowControl::None),
         "software" | "xon_xoff" | "xon/xoff" => Ok(FlowControl::Software),
         "hardware" | "rts_cts" | "rts/cts" => Ok(FlowControl::Hardware),
-        _ => Err(format!("flow_control 仅支持 none/software/hardware，收到 {s:?}")),
+        _ => Err(format!(
+            "flow_control 仅支持 none/software/hardware，收到 {s:?}"
+        )),
     }
 }
 
@@ -104,18 +118,26 @@ pub fn parse_baudrate(v: u32) -> Result<u32, String> {
 /// 串口信息（`uart_list_ports` 返回值）。
 #[derive(Debug, serde::Serialize)]
 pub struct PortInfo {
+    /// 串口名，如 `COM3`（Windows）或 `/dev/ttyUSB0`（Linux/macOS）。
     pub name: String,
+    /// 端口类型：`usb` / `bluetooth` / `pci` / `unknown`。
     pub port_type: String,
+    /// 人类可读描述（USB 设备为 vid/pid/序列号/产品名）。
     pub description: String,
 }
 
 /// 读取结果（`uart_read` / `uart_exchange` 返回值）。
 #[derive(Debug)]
 pub struct ReadOutcome {
+    /// 本次取走的全部未读字节。
     pub data: Vec<u8>,
+    /// 返回原因（idle / max_bytes / timeout）。
     pub reason: ReadReason,
+    /// 自上次读取以来因缓冲溢出被覆盖丢弃的字节数（>0 表示数据有缺口）。
     pub overflow_delta: u64,
+    /// 自打开以来累计的溢出字节数。
     pub overflow_total: u64,
+    /// 取走后缓冲中剩余的未读字节数。
     pub buffered: usize,
 }
 
@@ -133,17 +155,29 @@ pub enum ReadReason {
 /// 运行时状态快照（`uart_available` 返回值）。
 #[derive(Debug, serde::Serialize)]
 pub struct AvailableInfo {
+    /// 串口是否已打开。
     pub open: bool,
+    /// 已打开的串口名（未打开时为 `None`）。
     pub port: Option<String>,
+    /// 当前波特率。
     pub baudrate: Option<u32>,
+    /// 当前数据位（5-8）。
     pub data_bits: Option<u8>,
+    /// 当前校验位（none/even/odd）。
     pub parity: Option<String>,
+    /// 当前停止位（1 或 2）。
     pub stop_bits: Option<u8>,
+    /// 当前流控（none/software/hardware）。
     pub flow_control: Option<String>,
+    /// 当前读超时（毫秒）。
     pub read_timeout_ms: Option<u64>,
+    /// 环形缓冲容量（字节）。
     pub buffer_size: Option<usize>,
+    /// 缓冲中未读字节数。
     pub buffered_bytes: usize,
+    /// 累计溢出字节数（缓冲写满被覆盖丢弃）。
     pub overflow_total: u64,
+    /// 读线程的致命错误（端口被拔等），正常时为 `None`。
     pub read_error: Option<String>,
 }
 
@@ -169,6 +203,7 @@ pub struct SerialManager {
 }
 
 impl SerialManager {
+    /// 创建串口管理器（默认关闭状态）。
     pub fn new() -> Self {
         Self::default()
     }
@@ -260,7 +295,7 @@ impl SerialManager {
                             Err(e) => match e.kind() {
                                 // 读超时/端口暂时忙：正常现象，继续循环
                                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                                    continue
+                                    continue;
                                 }
                                 // 致命错误：记录并退出读线程
                                 other => {
@@ -315,23 +350,28 @@ impl SerialManager {
         {
             let mut port = ap.port.lock().unwrap();
             if let Some(v) = baudrate {
-                port.set_baud_rate(v).map_err(|e| format!("设置波特率失败: {e}"))?;
+                port.set_baud_rate(v)
+                    .map_err(|e| format!("设置波特率失败: {e}"))?;
                 ap.config.baudrate = v;
             }
             if let Some(v) = data_bits {
-                port.set_data_bits(v).map_err(|e| format!("设置数据位失败: {e}"))?;
+                port.set_data_bits(v)
+                    .map_err(|e| format!("设置数据位失败: {e}"))?;
                 ap.config.data_bits = v;
             }
             if let Some(v) = parity {
-                port.set_parity(v).map_err(|e| format!("设置校验位失败: {e}"))?;
+                port.set_parity(v)
+                    .map_err(|e| format!("设置校验位失败: {e}"))?;
                 ap.config.parity = v;
             }
             if let Some(v) = stop_bits {
-                port.set_stop_bits(v).map_err(|e| format!("设置停止位失败: {e}"))?;
+                port.set_stop_bits(v)
+                    .map_err(|e| format!("设置停止位失败: {e}"))?;
                 ap.config.stop_bits = v;
             }
             if let Some(v) = flow_control {
-                port.set_flow_control(v).map_err(|e| format!("设置流控失败: {e}"))?;
+                port.set_flow_control(v)
+                    .map_err(|e| format!("设置流控失败: {e}"))?;
                 ap.config.flow_control = v;
             }
             if let Some(v) = read_timeout_ms {

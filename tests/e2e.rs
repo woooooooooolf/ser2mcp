@@ -17,13 +17,13 @@ struct TestClient;
 
 impl ClientHandler for TestClient {}
 
-async fn connect() -> Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>, RmcpError> {
+async fn connect() -> Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>, RmcpError>
+{
     let bin = env!("CARGO_BIN_EXE_ser2mcp");
     let client = TestClient
         .serve(
-            TokioChildProcess::new(Command::new(bin)).map_err(RmcpError::transport_creation::<
-                TokioChildProcess,
-            >)?,
+            TokioChildProcess::new(Command::new(bin))
+                .map_err(RmcpError::transport_creation::<TokioChildProcess>)?,
         )
         .await?;
     Ok(client)
@@ -55,7 +55,10 @@ async fn e2e_tool_registration_and_errors() {
     let client = connect().await.expect("连接 ser2mcp 失败");
 
     // 1. 工具注册：应包含全部 9 个工具
-    let tools = client.list_tools(Default::default()).await.expect("list_tools 失败");
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list_tools 失败");
     let mut names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
     names.sort_unstable();
     assert_eq!(
@@ -80,10 +83,12 @@ async fn e2e_tool_registration_and_errors() {
         .find(|t| t.name == "uart_open")
         .expect("缺少 uart_open");
     assert!(open_tool.description.is_some());
-    assert!(open_tool.input_schema.len() > 0);
+    assert!(!open_tool.input_schema.is_empty());
 
     // 2. uart_list_ports：无硬件也应成功（返回数组，可能为空）
-    let r = call(&client, "uart_list_ports", json!({})).await.expect("list_ports 调用失败");
+    let r = call(&client, "uart_list_ports", json!({}))
+        .await
+        .expect("list_ports 调用失败");
     assert!(!r.is_error.unwrap_or(false));
     let ports = r
         .structured_content
@@ -93,17 +98,27 @@ async fn e2e_tool_registration_and_errors() {
     assert!(ports.is_array());
 
     // 3. uart_available：未打开时 open=false
-    let r = call(&client, "uart_available", json!({})).await.expect("available 调用失败");
+    let r = call(&client, "uart_available", json!({}))
+        .await
+        .expect("available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false));
 
     // 4. uart_read 未打开 → 工具级错误（结构化 error）
-    let r = call(&client, "uart_read", json!({"timeout_ms": 100})).await.expect("read 调用失败");
+    let r = call(&client, "uart_read", json!({"timeout_ms": 100}))
+        .await
+        .expect("read 调用失败");
     assert!(r.is_error.unwrap_or(false));
-    assert!(structured_error_of(&r).unwrap_or_default().contains("未打开"));
+    assert!(
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开")
+    );
 
     // 5. uart_write 未打开 → 工具级错误
-    let r = call(&client, "uart_write", json!({"data": "41"})).await.expect("write 调用失败");
+    let r = call(&client, "uart_write", json!({"data": "41"}))
+        .await
+        .expect("write 调用失败");
     assert!(r.is_error.unwrap_or(false));
 
     // 6. 参数校验：非法 hex → 协议级 invalid_params（call_tool 返回 Err）
@@ -111,16 +126,29 @@ async fn e2e_tool_registration_and_errors() {
     assert!(r.is_err(), "非法 hex 应触发 invalid_params: {r:?}");
 
     // 7. 参数校验：非法 mode → 协议级错误
-    let r = call(&client, "uart_read", json!({"mode": "base64", "timeout_ms": 100})).await;
+    let r = call(
+        &client,
+        "uart_read",
+        json!({"mode": "base64", "timeout_ms": 100}),
+    )
+    .await;
     assert!(r.is_err(), "非法 mode 应触发 invalid_params");
 
     // 8. uart_open 不存在的端口 → 工具级错误
-    let r = call(&client, "uart_open", json!({"port": "COM_SER2MCP_NONEXISTENT"})).await.expect("open 调用失败");
+    let r = call(
+        &client,
+        "uart_open",
+        json!({"port": "COM_SER2MCP_NONEXISTENT"}),
+    )
+    .await
+    .expect("open 调用失败");
     assert!(r.is_error.unwrap_or(false), "打开不存在的端口应报错: {r:?}");
     assert!(structured_error_of(&r).is_some());
 
     // 9. 打开失败后状态仍为未打开
-    let r = call(&client, "uart_available", json!({})).await.expect("available 调用失败");
+    let r = call(&client, "uart_available", json!({}))
+        .await
+        .expect("available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false));
 

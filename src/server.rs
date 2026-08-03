@@ -17,17 +17,15 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router,
+    ErrorData as McpError, ServerHandler, handler::server::wrapper::Parameters, model::*, tool,
+    tool_handler, tool_router,
 };
 use serde_json::json;
 
 use crate::hex;
 use crate::manager::{
-    self, PortConfig, ReadReason, SerialManager, DEFAULT_BUFFER_SIZE, DEFAULT_IDLE_MS,
-    DEFAULT_MAX_BYTES, DEFAULT_READ_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
+    self, DEFAULT_BUFFER_SIZE, DEFAULT_IDLE_MS, DEFAULT_MAX_BYTES, DEFAULT_READ_TIMEOUT_MS,
+    DEFAULT_TIMEOUT_MS, PortConfig, ReadReason, SerialManager,
 };
 
 /// 对 AI 助手的使用指引（随 initialize 返回）。
@@ -152,7 +150,10 @@ fn encode_recv(bytes: &[u8], mode: &str) -> (String, String) {
         "hex" => (hex::encode(bytes), "hex".to_string()),
         _ => {
             if hex::is_text(bytes) {
-                (String::from_utf8_lossy(bytes).into_owned(), "text".to_string())
+                (
+                    String::from_utf8_lossy(bytes).into_owned(),
+                    "text".to_string(),
+                )
             } else {
                 (hex::encode(bytes), "hex (text 降级)".to_string())
             }
@@ -176,6 +177,7 @@ pub struct Ser2Mcp {
 
 #[tool_router]
 impl Ser2Mcp {
+    /// 创建服务器实例（内部持有串口管理器，线程安全，可 Clone）。
     pub fn new() -> Self {
         Self {
             manager: Arc::new(SerialManager::new()),
@@ -183,7 +185,9 @@ impl Ser2Mcp {
     }
 
     /// 枚举本机当前可用的串口。
-    #[tool(description = "枚举本机当前可用的串口（名称、类型、USB 描述）。串口被占用时可能不出现。")]
+    #[tool(
+        description = "枚举本机当前可用的串口（名称、类型、USB 描述）。串口被占用时可能不出现。"
+    )]
     async fn uart_list_ports(&self) -> Result<CallToolResult, McpError> {
         match self.manager.list_ports() {
             Ok(ports) => Ok(CallToolResult::structured(json!({ "ports": ports }))),
@@ -196,7 +200,10 @@ impl Ser2Mcp {
     /// flow_control=none、read_timeout_ms=100、buffer_size=1048576（覆盖最旧+溢出计数）、
     /// discard_on_open=true。若已有打开的串口会先关闭再打开。
     #[tool(description = "打开串口并启动后台读线程。返回当前配置。")]
-    async fn uart_open(&self, Parameters(args): Parameters<OpenArgs>) -> Result<CallToolResult, McpError> {
+    async fn uart_open(
+        &self,
+        Parameters(args): Parameters<OpenArgs>,
+    ) -> Result<CallToolResult, McpError> {
         if args.port.trim().is_empty() {
             return Err(McpError::invalid_params("port 不能为空", None));
         }
@@ -220,7 +227,11 @@ impl Ser2Mcp {
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
             None => PortConfig::default().stop_bits,
         };
-        let flow_control = match args.flow_control.as_deref().map(manager::parse_flow_control) {
+        let flow_control = match args
+            .flow_control
+            .as_deref()
+            .map(manager::parse_flow_control)
+        {
             Some(Ok(v)) => v,
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
             None => PortConfig::default().flow_control,
@@ -250,8 +261,13 @@ impl Ser2Mcp {
     }
 
     /// 运行时重配置已打开的串口（仅更新传入的参数项）。
-    #[tool(description = "运行时重配置已打开的串口：baudrate / data_bits / parity / stop_bits / flow_control / read_timeout_ms，仅更新传入项。")]
-    async fn uart_configure(&self, Parameters(args): Parameters<ConfigureArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "运行时重配置已打开的串口：baudrate / data_bits / parity / stop_bits / flow_control / read_timeout_ms，仅更新传入项。"
+    )]
+    async fn uart_configure(
+        &self,
+        Parameters(args): Parameters<ConfigureArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let baudrate = match args.baudrate.map(manager::parse_baudrate) {
             Some(Ok(v)) => Some(v),
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
@@ -272,14 +288,25 @@ impl Ser2Mcp {
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
             None => None,
         };
-        let flow_control = match args.flow_control.as_deref().map(manager::parse_flow_control) {
+        let flow_control = match args
+            .flow_control
+            .as_deref()
+            .map(manager::parse_flow_control)
+        {
             Some(Ok(v)) => Some(v),
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
             None => None,
         };
         match self
             .manager
-            .configure(baudrate, data_bits, parity, stop_bits, flow_control, args.read_timeout_ms)
+            .configure(
+                baudrate,
+                data_bits,
+                parity,
+                stop_bits,
+                flow_control,
+                args.read_timeout_ms,
+            )
             .await
         {
             Ok(()) => Ok(CallToolResult::structured(json!(self.manager.available()))),
@@ -288,8 +315,13 @@ impl Ser2Mcp {
     }
 
     /// 向串口发送数据（只发不等回复），返回实际写入字节数。
-    #[tool(description = "向串口发送数据并立即返回（不等待回复）；如需发送+读取请用 uart_exchange。")]
-    async fn uart_write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "向串口发送数据并立即返回（不等待回复）；如需发送+读取请用 uart_exchange。"
+    )]
+    async fn uart_write(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let mode = args.mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
@@ -310,8 +342,13 @@ impl Ser2Mcp {
     /// 拉取串口上行缓冲：出现新数据后持续 idle_ms 无新字节（默认 300ms，视为一次响应结束）、
     /// 未读字节数达 max_bytes、或总等待超时 timeout_ms（默认 5000ms）时返回全部未读数据。
     /// 返回值含 overflow_delta/overflow_total（缓冲溢出被覆盖丢弃的字节数，>0 表示数据有缺口）。
-    #[tool(description = "读取串口上行缓冲（后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。")]
-    async fn uart_read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "读取串口上行缓冲（后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。"
+    )]
+    async fn uart_read(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
@@ -337,8 +374,13 @@ impl Ser2Mcp {
     }
 
     /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复。对大多数 AT 命令/查询场景最常用。
-    #[tool(description = "发送数据并等待回复（uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。")]
-    async fn uart_exchange(&self, Parameters(args): Parameters<ExchangeArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "发送数据并等待回复（uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。"
+    )]
+    async fn uart_exchange(
+        &self,
+        Parameters(args): Parameters<ExchangeArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let mode = args.mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
@@ -376,7 +418,9 @@ impl Ser2Mcp {
     }
 
     /// 查询串口状态：是否打开、当前配置、缓冲未读字节数、累计溢出字节数、读线程错误等。
-    #[tool(description = "查询串口运行状态与缓冲统计（open、配置、buffered_bytes、overflow_total、read_error）。")]
+    #[tool(
+        description = "查询串口运行状态与缓冲统计（open、配置、buffered_bytes、overflow_total、read_error）。"
+    )]
     async fn uart_available(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::structured(json!(self.manager.available())))
     }
@@ -405,5 +449,11 @@ impl ServerHandler for Ser2Mcp {
             .with_server_info(Implementation::new("ser2mcp", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(INSTRUCTIONS.to_string())
+    }
+}
+
+impl Default for Ser2Mcp {
+    fn default() -> Self {
+        Self::new()
     }
 }
