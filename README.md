@@ -67,7 +67,7 @@ cargo build --release
 # 产物：target/release/ser2mcp（Windows 下为 ser2mcp.exe）
 
 # 4. 自检（可选）：枚举本机串口
-cargo run --release --example loopback -- --list
+target/release/ser2mcp --list-ports
 
 # 5. 注册为 MCP server（见下方「接入 MCP 客户端」）
 ```

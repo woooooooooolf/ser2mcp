@@ -67,7 +67,7 @@ cargo build --release
 # Artifact: target/release/ser2mcp (ser2mcp.exe on Windows)
 
 # 4. Sanity check (optional): list local serial ports
-cargo run --release --example loopback -- --list
+target/release/ser2mcp --list-ports
 
 # 5. Register as an MCP server (see "Connecting to MCP Clients" below)
 ```
