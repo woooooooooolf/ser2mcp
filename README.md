@@ -3,15 +3,18 @@
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-中文（默认） | [English](README.en.md)
+简体中文 | [English](README.en.md)
 
 **UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Reasonix、Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
 
-```
-┌──────────────┐  JSON-RPC over stdio  ┌──────────────────┐  串口   ┌──────────┐
-│ MCP 客户端    │ ◄────────────────────► │ ser2mcp          │ ◄─────► │ UART 设备 │
-│ (AI 助手)     │                        │ 后台读线程+环形缓冲│         │ (TX-RX)  │
-└──────────────┘                        └──────────────────┘         └──────────┘
+```mermaid
+flowchart LR
+    client["MCP 客户端<br>（AI 助手）"]
+    server["ser2mcp<br>（后台读线程+环形缓冲）"]
+    uart["UART 设备<br>（TX-RX）"]
+
+    client <==>|"JSON-RPC over stdio"| server
+    server <==>|"串口"| uart
 ```
 
 ## 特性
@@ -23,9 +26,7 @@
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本
 - **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
 
-## 快速安装（AI 自动安装指南）
-
-以下步骤供人工或 AI 代理照此执行，即可完成拉取 → 构建 → 注册：
+## 快速安装
 
 ```bash
 # 1. 拉取仓库
@@ -50,7 +51,7 @@ cargo run --release --example loopback -- --list
 ## 构建与测试
 
 > **Linux 用户注意**：`serialport` 枚举 USB 端口信息依赖 `libudev`，编译前需先安装
-> （Debian/Ubuntu：`sudo apt-get install -y libudev-dev`；macOS / Windows 无需额外依赖）。
+> Debian/Ubuntu：`sudo apt-get install -y libudev-dev`
 
 ```bash
 cargo build --release   # 构建
@@ -104,7 +105,7 @@ command = "/absolute/path/to/ser2mcp"
 
 ### 读取语义（核心设计）
 
-串口上行数据由后台读线程**持续囤积**，工具**按需拉取**（AI 回合制调用的正确范式），`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
+串口上行数据由后台读线程**持续囤积**，工具**按需拉取**，`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
 
 1. **空闲判定**：出现新数据后持续 `idle_ms`（默认 300ms）无新字节 → 视为一次响应结束（`reason: "idle"`）
 2. **达到上限**：未读字节数 ≥ `max_bytes`（默认 64 KiB）→ 防堆积（`reason: "max_bytes"`）
@@ -141,7 +142,7 @@ command = "/absolute/path/to/ser2mcp"
 内置一键自测工具：枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：
 
 ```bash
-cargo run --release --example loopback -- --list     # 枚举本机串口
+cargo run --release --example loopback -- --list      # 枚举本机串口
 cargo run --release --example loopback -- COM3 115200 # 回环测试
 ```
 

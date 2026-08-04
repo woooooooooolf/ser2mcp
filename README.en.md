@@ -3,16 +3,18 @@
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-**English** | [中文（默认）](README.md)
+**English** | [简体中文](README.md)
 
 **UART serial port MCP server**: exposes local serial port devices as standard **MCP (Model Context Protocol)** tools, so AI assistants (Reasonix, Claude Desktop, Cursor, or any MCP client) can read and write serial ports directly.
 
-```
-┌──────────────┐  JSON-RPC over stdio  ┌──────────────────┐  UART   ┌──────────┐
-│ MCP client   │ ◄────────────────────► │ ser2mcp          │ ◄─────► │ UART dev │
-│ (AI agent)   │                        │ reader thread +  │         │ (TX-RX)  │
-│              │                        │ ring buffer      │         │          │
-└──────────────┘                        └──────────────────┘         └──────────┘
+```mermaid
+flowchart LR
+    client["MCP client<br>（AI agent）"]
+    server["ser2mcp<br>（reader thread + ring buffer）"]
+    uart["UART device<br>（TX-RX）"]
+
+    client <==>|"JSON-RPC over stdio"| server
+    server <==>|"UART"| uart
 ```
 
 ## Features
@@ -24,9 +26,7 @@
 - **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text
 - **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
 
-## Quick Install (AI Auto-Install Guide)
-
-The steps below can be executed by a human or an AI agent to go from clone → build → registration:
+## Quick Install
 
 ```bash
 # 1. Clone the repository
@@ -51,8 +51,7 @@ cargo run --release --example loopback -- --list
 ## Build & Test
 
 > **Linux users**: `serialport` needs `libudev` to enumerate USB port information.
-> Install it before building (Debian/Ubuntu: `sudo apt-get install -y libudev-dev`;
-> macOS / Windows need no extra dependency).
+> Debian/Ubuntu: `sudo apt-get install -y libudev-dev`
 
 ```bash
 cargo build --release   # build
@@ -106,7 +105,7 @@ Environment variables (optional):
 
 ### Read Semantics (Core Design)
 
-Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools (the correct paradigm for AI turn-based calls). `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
+Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools. `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
 
 1. **Idle detection**: after new data arrives, no new bytes for `idle_ms` (default 300ms) → the response is considered complete (`reason: "idle"`)
 2. **Cap reached**: unread bytes ≥ `max_bytes` (default 64 KiB) → prevents backlog (`reason: "max_bytes"`)
@@ -143,7 +142,7 @@ Example return value:
 Built-in one-command self-test: enumerate ports + run a full loopback verification on a given port (sends the full 0x00-0xFF byte sequence and verifies it comes back unchanged):
 
 ```bash
-cargo run --release --example loopback -- --list     # enumerate local ports
+cargo run --release --example loopback -- --list      # enumerate local ports
 cargo run --release --example loopback -- COM3 115200 # loopback test
 ```
 
