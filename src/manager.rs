@@ -272,45 +272,49 @@ impl SerialManager {
             let _ = guard.clear(serialport::ClearBuffer::Input);
         }
 
+        // 读线程使用独立句柄，避免与命令操作（write/configure）争用同一 Mutex：
+        // 部分 USB 转串口驱动（如 CH340）偶发让 read() 阻塞远超设定超时，
+        // 若共用句柄，读线程会连带阻塞 write()，导致工具调用长时间无响应。
+        let reader_port = port
+            .lock()
+            .unwrap()
+            .try_clone()
+            .map_err(|e| format!("克隆串口读句柄失败: {e}"))?;
+
         let buffer = RingBuf::new(buffer_size);
         let stop = Arc::new(AtomicBool::new(false));
         let read_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // 后台读线程：串口 → 环形缓冲。
-        let reader_port = port.clone();
         let reader_buffer = buffer.clone();
         let reader_stop = stop.clone();
         let reader_error = read_error.clone();
         let reader = std::thread::Builder::new()
             .name("ser2mcp-reader".into())
             .spawn(move || {
+                let mut port = reader_port;
                 let mut chunk = [0u8; READ_CHUNK];
                 loop {
                     if reader_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    let n = {
-                        let mut guard = match reader_port.lock() {
-                            Ok(g) => g,
-                            Err(_) => break, // 锁中毒：直接退出
-                        };
-                        match guard.read(&mut chunk) {
-                            Ok(n) => n,
-                            Err(e) => match e.kind() {
-                                // 读超时/端口暂时忙：正常现象，继续循环
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                                    continue;
-                                }
-                                // 致命错误：记录并退出读线程
-                                other => {
-                                    *reader_error.lock().unwrap() = Some(format!("{other}: {e}"));
-                                    break;
-                                }
-                            },
+                    match port.read(&mut chunk) {
+                        Ok(n) => {
+                            if n > 0 {
+                                reader_buffer.push(&chunk[..n]);
+                            }
                         }
-                    };
-                    if n > 0 {
-                        reader_buffer.push(&chunk[..n]);
+                        Err(e) => match e.kind() {
+                            // 读超时/端口暂时忙：正常现象，继续循环
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            // 致命错误：记录并退出读线程
+                            other => {
+                                *reader_error.lock().unwrap() = Some(format!("{other}: {e}"));
+                                break;
+                            }
+                        },
                     }
                 }
             })

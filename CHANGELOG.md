@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-08-04
+
+### Fixed
+
+- 读线程改用独立串口句柄（`try_clone`），修复部分 USB 转串口驱动（如 CH340）偶发读阻塞导致 `write` / 工具调用长时间无响应的问题（真实硬件稳定性测试发现）
+
 ## [0.2.0] - 2026-08-04
 
 ### Added
@@ -32,3 +38,4 @@
 
 [0.1.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.1.0
 [0.2.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.0
+[0.2.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.1
