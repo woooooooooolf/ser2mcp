@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Release](https://img.shields.io/github/v/release/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp/releases)
 
 **English** | [简体中文](README.md)
 
@@ -27,6 +28,8 @@ flowchart LR
 - **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
 
 ## Quick Install
+
+> You can also download prebuilt binaries for your platform (Windows / Linux / macOS) from the [Releases](https://github.com/woooooooooolf/ser2mcp/releases) page.
 
 ```bash
 # 1. Clone the repository
@@ -160,6 +163,10 @@ examples/
 - [rmcp](https://github.com/modelcontextprotocol/rust-sdk) (official Rust MCP SDK)
 - [serialport](https://crates.io/crates/serialport)
 - tokio / serde / schemars
+
+## Security Notice
+
+ser2mcp gives AI assistants direct read/write access to your serial ports: any authorized MCP client (and the model behind it) can send arbitrary bytes to connected devices. Only connect devices you trust, make sure your MCP client and model are from reliable sources, and do not use this tool with devices that could be damaged by incorrect commands.
 
 ## License
 

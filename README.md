@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Release](https://img.shields.io/github/v/release/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp/releases)
 
 简体中文 | [English](README.en.md)
 
@@ -27,6 +28,8 @@ flowchart LR
 - **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
 
 ## 快速安装
+
+> 也可以直接从 [Releases](https://github.com/woooooooooolf/ser2mcp/releases) 下载对应平台的预编译二进制（Windows / Linux / macOS）。
 
 ```bash
 # 1. 拉取仓库
@@ -160,6 +163,10 @@ examples/
 - [rmcp](https://github.com/modelcontextprotocol/rust-sdk)（官方 Rust MCP SDK）
 - [serialport](https://crates.io/crates/serialport)
 - tokio / serde / schemars
+
+## 安全提示
+
+ser2mcp 会把串口的读写能力直接交给 AI 助手：已授权的 MCP 客户端（以及背后的模型）可以向串口设备发送任意字节。请只连接你信任的设备，并确保 MCP 客户端与模型来源可信；不要把该工具用于可能因错误指令而损坏的设备。
 
 ## License
 

@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: ser2mcp-windows-x64
+          - os: ubuntu-latest
+            artifact: ser2mcp-linux-x64
+          - os: macos-latest
+            artifact: ser2mcp-macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 工具链
+        run: rustup toolchain install stable --profile minimal
+
+      - name: 安装系统依赖 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: 提取版本号
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 构建 release 二进制
+        run: cargo build --release
+
+      - name: 生成 Rust 文档
+        run: cargo doc --no-deps
+
+      - name: 组装发布包
+        shell: bash
+        run: |
+          VERSION="V${{ steps.version.outputs.version }}"
+          PKG="release/${{ matrix.artifact }}-$VERSION"
+          mkdir -p "$PKG/docs"
+          if [ -f target/release/ser2mcp.exe ]; then
+            cp target/release/ser2mcp.exe "$PKG/"
+          else
+            cp target/release/ser2mcp "$PKG/"
+          fi
+          cp README.md README.en.md LICENSE-MIT LICENSE-APACHE "$PKG/"
+          cp -r target/doc/* "$PKG/docs/"
+          # rustdoc 不再生成根 index.html，补一个重定向页作为文档入口
+          cat > "$PKG/docs/index.html" <<'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=ser2mcp/index.html">
+  <title>ser2mcp docs</title>
+</head>
+<body><a href="ser2mcp/index.html">ser2mcp Rust 文档</a></body>
+</html>
+EOF
+
+      - name: 打包压缩
+        shell: bash
+        run: |
+          VERSION="V${{ steps.version.outputs.version }}"
+          PKG="release/${{ matrix.artifact }}-$VERSION"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '$PKG' -DestinationPath '$PKG.zip' -CompressionLevel Optimal"
+          else
+            tar -czf "$PKG.tar.gz" -C release "$(basename "$PKG")"
+          fi
+          rm -rf "$PKG"
+
+      - name: 生成 sha256 校验和
+        shell: bash
+        run: |
+          cd release
+          python3 - <<'PY'
+import glob, hashlib
+for f in glob.glob("*.zip") + glob.glob("*.tar.gz"):
+    h = hashlib.sha256(open(f, "rb").read()).hexdigest()
+    open(f + ".sha256", "w").write(f"{h}  {f}\n")
+PY
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.sha256
+
+  publish:
+    name: 创建 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 提取版本号
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 从 CHANGELOG 生成发布说明
+        shell: bash
+        run: |
+          VER="[${{ steps.version.outputs.version }}]"
+          awk -v ver="$VER" '
+            /^## / { if (in_section) exit; if (index($0, ver)) in_section = 1 }
+            in_section && !/^\[[^]]+\]:/ { print }
+          ' CHANGELOG.md > release-notes.md
+
+      - name: 创建 GitHub Release 并上传压缩包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="V${{ steps.version.outputs.version }}"
+          ASSETS=(dist/*.zip dist/*.tar.gz dist/*.sha256)
+          if [ -s release-notes.md ]; then
+            gh release create "${{ github.ref_name }}" "${ASSETS[@]}" \
+              --title "ser2mcp $VERSION" --notes-file release-notes.md
+          else
+            gh release create "${{ github.ref_name }}" "${ASSETS[@]}" \
+              --title "ser2mcp $VERSION" --generate-notes
+          fi

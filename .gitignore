@@ -2,3 +2,8 @@
 /.reasonix
 reasonix.toml
 *.log
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
