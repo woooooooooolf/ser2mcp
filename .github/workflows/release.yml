@@ -60,16 +60,16 @@ jobs:
           cp -r target/doc/* "$PKG/docs/"
           # rustdoc 不再生成根 index.html，补一个重定向页作为文档入口
           cat > "$PKG/docs/index.html" <<'EOF'
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=ser2mcp/index.html">
-  <title>ser2mcp docs</title>
-</head>
-<body><a href="ser2mcp/index.html">ser2mcp Rust 文档</a></body>
-</html>
-EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=ser2mcp/index.html">
+            <title>ser2mcp docs</title>
+          </head>
+          <body><a href="ser2mcp/index.html">ser2mcp Rust 文档</a></body>
+          </html>
+          EOF
 
       - name: 打包压缩
         shell: bash
@@ -88,11 +88,11 @@ EOF
         run: |
           cd release
           python3 - <<'PY'
-import glob, hashlib
-for f in glob.glob("*.zip") + glob.glob("*.tar.gz"):
-    h = hashlib.sha256(open(f, "rb").read()).hexdigest()
-    open(f + ".sha256", "w").write(f"{h}  {f}\n")
-PY
+          import glob, hashlib
+          for f in glob.glob("*.zip") + glob.glob("*.tar.gz"):
+              h = hashlib.sha256(open(f, "rb").read()).hexdigest()
+              open(f + ".sha256", "w").write(f"{h}  {f}\n")
+          PY
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
