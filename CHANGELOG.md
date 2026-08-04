@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-08-04
+
+### Changed
+
+- 默认 `read_timeout_ms` 从 100ms 调整为 10ms：Windows 上 CH340 / CP210x 等 USB 转串口驱动对阻塞读按超时边界成批交付数据，调小该值可显著降低 `uart_read` / `uart_exchange` 延迟（CH340 / CP210x 双芯片实测：1000ms 时延迟呈 ~1s 整数倍，10ms 时与直连串口相当）
+
+### Added
+
+- 延迟探针示例 `examples/latency_probe.rs`：通过真实 MCP 协议测量各工具延迟，支持 `bench`（读写往返压测）与 `benchw`（纯写入路径），便于复测与参数对比
+
+### Docs
+
+- README 补充 Windows USB 转串口延迟说明与调优提醒（`read_timeout_ms` / `idle_ms`），提醒 AI 工具在实际使用中按需调整
+
 ## [0.2.1] - 2026-08-04
 
 ### Fixed
@@ -39,3 +53,4 @@
 [0.1.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.1.0
 [0.2.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.0
 [0.2.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.1
+[0.2.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.2

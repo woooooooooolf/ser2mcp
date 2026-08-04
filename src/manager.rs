@@ -22,7 +22,13 @@ use crate::ring::RingBuf;
 /// 默认波特率（115200）。
 pub const DEFAULT_BAUDRATE: u32 = 115200;
 /// 默认串口读超时（毫秒），也是读线程的最长阻塞时间。
-pub const DEFAULT_READ_TIMEOUT_MS: u64 = 100;
+///
+/// 调优说明（Windows + USB 转串口实测）：CH340 / CP210x 等驱动的阻塞读会按
+/// 超时边界成批交付数据，超时设得越大，`uart_read` / `uart_exchange` 的额外延迟
+/// 越高（实测 1000ms 时延迟成 ~1s 整数倍；10ms 时与直连串口相当）。默认取 10ms，
+/// AI 工具在实际使用中仍可按需通过 `uart_open` / `uart_configure` 的
+/// `read_timeout_ms` 参数调整。
+pub const DEFAULT_READ_TIMEOUT_MS: u64 = 10;
 /// 默认上行环形缓冲大小（1 MiB），写满覆盖最旧数据并计数溢出。
 pub const DEFAULT_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
 /// 默认空闲判定阈值（毫秒）：出现新数据后持续该时长无新字节视为一次响应结束。

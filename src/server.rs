@@ -72,7 +72,9 @@ pub struct OpenArgs {
     pub stop_bits: Option<u8>,
     /// 流控 none/software/hardware，默认 none。
     pub flow_control: Option<String>,
-    /// 读线程的串口读超时（毫秒），默认 100；也决定关闭时的最长等待。
+    /// 读线程的串口读超时（毫秒），默认 10；也决定关闭时的最长等待。
+    /// Windows 上 USB 转串口驱动（CH340/CP210x）的阻塞读按超时边界交付数据，
+    /// 该值越小读写延迟越低（实测 10ms 与直连相当）；如遇延迟异常可显式调小。
     pub read_timeout_ms: Option<u64>,
     /// 上行环形缓冲大小（字节），默认 1048576（1 MiB）；写满覆盖最旧数据并计数溢出。
     pub buffer_size: Option<usize>,
@@ -242,7 +244,7 @@ impl Ser2Mcp {
 
     /// 打开串口并启动后台读线程（持续把上行数据囤积进环形缓冲）。
     /// 参数：port 必填；baudrate=115200、data_bits=8、parity=none、stop_bits=1、
-    /// flow_control=none、read_timeout_ms=100、buffer_size=1048576（覆盖最旧+溢出计数）、
+    /// flow_control=none、read_timeout_ms=10、buffer_size=1048576（覆盖最旧+溢出计数）、
     /// discard_on_open=true。支持同时打开多个串口；同一端口重复打开会报错。
     #[tool(
         description = "打开串口并启动后台读线程。支持同时打开多个串口（端口名即句柄）；返回当前配置。"
