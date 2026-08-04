@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Release](https://img.shields.io/github/v/release/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp/releases)
+[![Release](https://img.shields.io/github/v/release/woooooooooolf/ser2mcp?sort=semver)](https://github.com/woooooooooolf/ser2mcp/releases)
 
 **English** | [简体中文](README.md)
 
