@@ -45,7 +45,8 @@ flowchart LR
 
 - **9 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, status, clear buffer, close
 - **Full serial parameter control**: baudrate / data bits (5-8) / parity (none/even/odd) / stop bits (1,2) / flow control (none/software/hardware) / read timeout — all settable via `uart_open` / `uart_configure`
-- **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 10ms)
+- **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
+- **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
 - **No data loss or blocking on ingress**: a background reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
 - **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text
 - **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
@@ -170,7 +171,7 @@ Example return value:
 5. uart_close {port: "COM3"}
 ```
 
-> **Latency note (for AI tools)**: on Windows, USB-to-serial drivers such as CH340 / CP210x deliver data to blocking reads at timeout boundaries, so a larger `read_timeout_ms` adds more read/write latency (measured: ~1s multiples at 1000ms; equivalent to direct serial access at 10ms). The default is already 10ms; if you hit unusual latency, pass `read_timeout_ms: 10` explicitly, and consider lowering `idle_ms` (default 300ms, e.g. 50ms) for `uart_exchange` / `uart_read` — but keep it larger than the device's response gap, or the response may be truncated.
+> **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms); lower it (e.g. 50ms) for `uart_exchange` / `uart_read` if you need lower latency — but keep it larger than the device's response gap, or the response may be truncated.
 
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
 
@@ -190,6 +191,7 @@ src/
 ├── hex.rs       # hex encode/decode (hex/text dual mode)
 ├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify)
 ├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull)
+├── reader.rs    # event-driven / non-blocking reader thread (platform adaptation layer)
 └── server.rs    # MCP tool layer (9 tools + ServerHandler)
 tests/
 └── e2e.rs       # end-to-end MCP protocol tests (real subprocess handshake)
@@ -212,7 +214,7 @@ ser2mcp gives AI assistants direct read/write access to your serial ports: any a
 - **Permission denied / cannot open `/dev/ttyUSB0` on Linux**: your user is not in the `dialout` (or `uucp`) group. Run `scripts/linux-serial-permissions.sh` as root, then log out and back in.
 - **Port open failure / port busy**: make sure no other serial terminal or MCP instance is using the port.
 - **No ports found on Windows**: check that the USB-to-serial driver (CH340 / CP210x, etc.) is installed.
-- **High / intermittent multi-second latency on Windows**: CH340 / CP210x and similar drivers deliver data to blocking reads at timeout boundaries; a larger `read_timeout_ms` (default 10ms) adds more latency (measured: ~1s multiples at 1000ms, equivalent to direct access at 10ms). AI tools can pass `read_timeout_ms: 10` explicitly and lower `idle_ms` to reduce the fixed wait per read/write.
+- **High tool-call latency**: the fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms); lower it to match the device response rhythm (e.g. 50ms). `read_timeout_ms` (default 500ms) is only a safety cap and does not affect latency.
 - **Missing / incomplete data**: `overflow_delta > 0` means data was dropped due to buffer overflow; increase `buffer_size` or pull data more frequently.
 
 ## License

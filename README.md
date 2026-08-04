@@ -45,7 +45,8 @@ flowchart LR
 
 - **9 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、状态、清缓冲、关闭
 - **完善的串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
-- **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 10ms）
+- **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
+- **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
 - **上行数据不丢不堵**：后台读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本
 - **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
@@ -170,7 +171,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 5. uart_close {port: "COM3"}
 ```
 
-> **延迟提示（AI 工具注意）**：Windows 上 CH340 / CP210x 等 USB 转串口驱动对阻塞读按超时边界成批交付数据，`read_timeout_ms` 越大读写延迟越高（实测 1000ms 时延迟呈 ~1s 整数倍，10ms 时与直连串口相当）。默认已调为 10ms；如遇延迟异常，请显式传入 `read_timeout_ms: 10`，并可按设备响应节奏适当调小 `uart_exchange` / `uart_read` 的 `idle_ms`（默认 300ms，例如 50ms；注意保持大于设备响应间隙，否则可能截断响应）。
+> **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟。单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms）；如需更低延迟，可按设备响应节奏调小 `uart_exchange` / `uart_read` 的 `idle_ms`（例如 50ms；注意保持大于设备响应间隙，否则可能截断响应）。
 
 ## 回环自测（真实硬件，TX-RX 短接）
 
@@ -189,7 +190,8 @@ src/
 ├── lib.rs       # crate 文档与模块声明
 ├── hex.rs       # hex 编解码（hex/text 双模式）
 ├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒）
-├── manager.rs   # 串口管理器（打开/重配置/后台读线程/写/拉取）
+├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取）
+├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）
 └── server.rs    # MCP 工具层（9 个工具 + ServerHandler）
 tests/
 └── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手）
@@ -212,7 +214,7 @@ ser2mcp 会把串口的读写能力直接交给 AI 助手：已授权的 MCP 客
 - **Linux 下提示权限不足 / 无法打开 `/dev/ttyUSB0`**：当前用户不在 `dialout`（或 `uucp`）组。以 root 运行 `scripts/linux-serial-permissions.sh`，注销并重新登录后生效。
 - **端口打开失败 / 提示已被占用**：确认没有其他串口终端或 MCP 实例占用该端口。
 - **Windows 下枚举不到串口**：检查 CH340 / CP210x 等 USB 转串口驱动是否已安装。
-- **Windows 下工具调用延迟偏高 / 偶发秒级延迟**：CH340 / CP210x 等驱动对阻塞读按超时边界成批交付数据，`read_timeout_ms`（默认 10ms）越大额外延迟越高（实测 1000ms 时延迟呈 ~1s 整数倍，10ms 时与直连相当）。AI 工具实际使用中可显式传入 `read_timeout_ms: 10`，并按响应节奏调小 `idle_ms` 以降低每次读写的固定等待。
+- **工具调用延迟偏高**：单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms）；可按设备响应节奏调小（例如 50ms）。`read_timeout_ms`（默认 500ms）只是读安全上限，不影响延迟。
 - **数据不完整或缺失**：返回值 `overflow_delta > 0` 表示缓冲溢出丢数据，应调大 `buffer_size` 或减小拉取间隔。
 
 ## License

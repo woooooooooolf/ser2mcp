@@ -7,7 +7,7 @@
 //! cargo build --release                     # 先构建 ser2mcp 本体
 //! cargo run --release --example latency_probe -- COM27 [baudrate] [idle_ms] [iters]
 //! cargo run --release --example latency_probe -- bench  COM27 [baudrate] [idle_ms] [iters] [read_timeout_ms]
-//! # read_timeout_ms 缺省时使用 ser2mcp 服务端默认值（10ms），也可显式传入（如 100 / 1000）做对比
+//! # read_timeout_ms 缺省时使用 ser2mcp 服务端默认值，也可显式传入（如 100 / 1000）做对比
 //! cargo run --release --example latency_probe -- benchw COM27 [iters]            # 只测 uart_write 路径
 //! # 默认: COM27 115200 idle_ms=300 iters=5
 //! ```
@@ -350,9 +350,9 @@ async fn bench_mode(args: &[String]) {
 
     println!(
         "=== bench: 端口={port} 波特率={baudrate} idle_ms={idle_ms} iters={iters} read_timeout_ms={} ===",
-        read_timeout_ms
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "默认(10ms)".to_string())
+        read_timeout_ms.map(|v| v.to_string()).unwrap_or_else(|| {
+            format!("默认({}ms)", ser2mcp::manager::DEFAULT_READ_TIMEOUT_MS)
+        })
     );
 
     let client = connect().await.expect("连接 ser2mcp 失败");

@@ -10,7 +10,7 @@
 //! - 所有写/读/配置操作经 `io_lock` 串行化，保证 AI 回合制调用下语义清晰。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,14 +21,14 @@ use crate::ring::RingBuf;
 
 /// 默认波特率（115200）。
 pub const DEFAULT_BAUDRATE: u32 = 115200;
-/// 默认串口读超时（毫秒），也是读线程的最长阻塞时间。
+/// 默认串口读超时（毫秒）。
 ///
-/// 调优说明（Windows + USB 转串口实测）：CH340 / CP210x 等驱动的阻塞读会按
-/// 超时边界成批交付数据，超时设得越大，`uart_read` / `uart_exchange` 的额外延迟
-/// 越高（实测 1000ms 时延迟成 ~1s 整数倍；10ms 时与直连串口相当）。默认取 10ms，
-/// AI 工具在实际使用中仍可按需通过 `uart_open` / `uart_configure` 的
-/// `read_timeout_ms` 参数调整。
-pub const DEFAULT_READ_TIMEOUT_MS: u64 = 10;
+/// 事件驱动/非阻塞读线程（见 `reader` 模块）下，该值只是 `read()` 调用的安全上限
+/// （检测异常阻塞/超时），**不再决定读写延迟**；延迟由事件等待（Unix `poll` /
+/// Windows 1ms 轮询）与 `idle_ms` 决定。默认取 500ms，可容纳板端命令执行时间
+/// 较长的情形；如遇异常仍可通过 `uart_open` / `uart_configure` 的
+/// `read_timeout_ms` 调整。
+pub const DEFAULT_READ_TIMEOUT_MS: u64 = 500;
 /// 默认上行环形缓冲大小（1 MiB），写满覆盖最旧数据并计数溢出。
 pub const DEFAULT_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
 /// 默认空闲判定阈值（毫秒）：出现新数据后持续该时长无新字节视为一次响应结束。
@@ -37,7 +37,6 @@ pub const DEFAULT_IDLE_MS: u64 = 300;
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// 默认总等待超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
-const READ_CHUNK: usize = 4096;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// 规范化后的串口运行时配置。
@@ -195,7 +194,8 @@ struct ActivePort {
     config: PortConfig,
     port_name: String,
     buffer: Arc<RingBuf>,
-    stop: Arc<AtomicBool>,
+    /// 读线程停止令牌（可中断事件等待）。
+    stop: crate::reader::ReaderStop,
     reader: Option<JoinHandle<()>>,
     read_error: Arc<Mutex<Option<String>>>,
     /// 上次读取时的累计溢出计数（用于计算增量），随端口生命周期存在。
@@ -263,65 +263,41 @@ impl SerialManager {
         }
 
         let builder = serialport::new(port_name, baudrate);
-        let port = builder
+        // 用 open_native() 拿到具体端口类型（TTYPort/COMPort），
+        // 以便为事件驱动/非阻塞读线程提供底层 fd/句柄。
+        let native = builder
             .data_bits(data_bits)
             .parity(parity)
             .stop_bits(stop_bits)
             .flow_control(flow_control)
             .timeout(Duration::from_millis(read_timeout_ms))
-            .open()
+            .open_native()
             .map_err(|e| format!("打开 {port_name} 失败: {e}"))?;
 
-        let port = Arc::new(Mutex::new(port));
+        let reader_native = native
+            .try_clone_native()
+            .map_err(|e| format!("克隆串口读句柄失败: {e}"))?;
+        let port = Arc::new(Mutex::new(Box::new(native) as Box<dyn SerialPort>));
         if discard_on_open {
             let guard = port.lock().unwrap();
             let _ = guard.clear(serialport::ClearBuffer::Input);
         }
 
-        // 读线程使用独立句柄，避免与命令操作（write/configure）争用同一 Mutex：
-        // 部分 USB 转串口驱动（如 CH340）偶发让 read() 阻塞远超设定超时，
-        // 若共用句柄，读线程会连带阻塞 write()，导致工具调用长时间无响应。
-        let reader_port = port
-            .lock()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| format!("克隆串口读句柄失败: {e}"))?;
-
         let buffer = RingBuf::new(buffer_size);
         let stop = Arc::new(AtomicBool::new(false));
         let read_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-        // 后台读线程：串口 → 环形缓冲。
-        let reader_buffer = buffer.clone();
-        let reader_stop = stop.clone();
+        // 后台读线程：串口 → 环形缓冲（事件驱动/非阻塞，详见 reader 模块）。
+        // 使用独立句柄，避免与命令操作（write/configure）争用同一 Mutex。
+        let (event_reader, reader_stop) =
+            crate::reader::EventReader::new(reader_native, buffer.clone(), stop.clone())
+                .map_err(|e| format!("初始化读线程失败: {e}"))?;
         let reader_error = read_error.clone();
         let reader = std::thread::Builder::new()
             .name("ser2mcp-reader".into())
             .spawn(move || {
-                let mut port = reader_port;
-                let mut chunk = [0u8; READ_CHUNK];
-                loop {
-                    if reader_stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match port.read(&mut chunk) {
-                        Ok(n) => {
-                            if n > 0 {
-                                reader_buffer.push(&chunk[..n]);
-                            }
-                        }
-                        Err(e) => match e.kind() {
-                            // 读超时/端口暂时忙：正常现象，继续循环
-                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            // 致命错误：记录并退出读线程
-                            other => {
-                                *reader_error.lock().unwrap() = Some(format!("{other}: {e}"));
-                                break;
-                            }
-                        },
-                    }
+                if let Some(e) = event_reader.run() {
+                    *reader_error.lock().unwrap() = Some(e);
                 }
             })
             .map_err(|e| format!("启动读线程失败: {e}"))?;
@@ -342,7 +318,7 @@ impl SerialManager {
                 },
                 port_name: port_name.to_string(),
                 buffer,
-                stop,
+                stop: reader_stop,
                 reader: Some(reader),
                 read_error,
                 last_overflow: Arc::new(Mutex::new(0)),
@@ -535,7 +511,7 @@ impl SerialManager {
             .unwrap()
             .remove(port_name)
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-        ap.stop.store(true, Ordering::Relaxed);
+        ap.stop.signal();
         if let Some(handle) = ap.reader {
             // 读线程至多 read_timeout 内返回；此处短暂阻塞可接受。
             let _ = handle.join();

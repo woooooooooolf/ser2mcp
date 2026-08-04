@@ -5,6 +5,7 @@
 
 mod hex;
 mod manager;
+mod reader;
 mod ring;
 mod server;
 

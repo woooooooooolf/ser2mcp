@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-08-04
+
+### Added
+
+- 事件驱动/非阻塞读线程 `src/reader.rs`（平台适配层）：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动、停止可被管道唤醒；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
+
+### Changed
+
+- 默认 `read_timeout_ms` 从 10ms 调整为 500ms：新读线程模型下该参数仅作为 `read()` 的安全上限（检测异常超时），不再影响读写延迟，可容纳板端命令执行时间较长的情形
+- `uart_close` 延迟从 ~116ms 降至 ~1.4ms（事件等待可被停止令牌中断）；`uart_write` 净开销中位降至 ~0.4ms
+
+### Fixed
+
+- 消除 Windows USB 转串口驱动（CH340/CP210x）按读超时边界成批交付数据导致的延迟尖峰：实测 `read_timeout_ms=1000` 时读写往返不再呈 ~1s 整数倍（COM9 回环中位 59ms，与默认配置一致；旧模型为 2966ms）
+
 ## [0.2.2] - 2026-08-04
 
 ### Changed
@@ -54,3 +69,4 @@
 [0.2.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.0
 [0.2.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.1
 [0.2.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.2
+[0.3.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.3.0
