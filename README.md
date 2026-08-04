@@ -1,8 +1,31 @@
 # ser2mcp
 
 [![CI](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/woooooooooolf/ser2mcp/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Release](https://img.shields.io/github/v/release/woooooooooolf/ser2mcp?sort=semver)](https://github.com/woooooooooolf/ser2mcp/releases)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Stars](https://img.shields.io/github/stars/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp)
+[![Forks](https://img.shields.io/github/forks/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp/fork)
+[![Last commit](https://img.shields.io/github/last-commit/woooooooooolf/ser2mcp)](https://github.com/woooooooooolf/ser2mcp/commits/main)
+[![Downloads](https://img.shields.io/github/downloads/woooooooooolf/ser2mcp/total)](https://github.com/woooooooooolf/ser2mcp/releases)
+
+[![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)](https://github.com/woooooooooolf/ser2mcp/releases)
+[![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/woooooooooolf/ser2mcp/releases)
+[![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://github.com/woooooooooolf/ser2mcp/releases)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/woooooooooolf/ser2mcp/actions)
+
+![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
+![Rust (top language)](https://img.shields.io/github/languages/top/woooooooooolf/ser2mcp)
+![Edition 2024](https://img.shields.io/badge/Edition-2024-000000)
+![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-orange)
+![tokio](https://img.shields.io/badge/tokio-runtime-2CA5E0?logo=tokio)
+![rmcp](https://img.shields.io/badge/rmcp-MCP_SDK-4B32C3)
+![serialport](https://img.shields.io/badge/serialport-4.9-2C3E50)
+
+![MCP](https://img.shields.io/badge/MCP-Model_Context_Protocol-000000?logo=modelcontextprotocol&logoColor=white)
+![UART](https://img.shields.io/badge/UART-Serial_Port-007EC6)
+![hex/text](https://img.shields.io/badge/hex%2Ftext-binary_safe-00ADD8)
+![unsafe](https://img.shields.io/badge/unsafe-none-2EA043)
+![single binary](https://img.shields.io/badge/single_binary-no_runtime-512BD4)
 
 简体中文 | [English](README.en.md)
 
