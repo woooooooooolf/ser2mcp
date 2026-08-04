@@ -62,7 +62,7 @@ pub fn decode(s: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    if !cleaned.len().is_multiple_of(2) {
+    if cleaned.len() % 2 != 0 {
         return Err(format!(
             "hex 字符串长度必须为偶数（当前有效字符数 {}）",
             cleaned.len()
