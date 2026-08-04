@@ -29,9 +29,14 @@ use crate::manager::{
 };
 
 /// 对 AI 助手的使用指引（随 initialize 返回）。
-const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器。
+const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不匹配、不过滤字节流内容）。
 
-典型流程：uart_list_ports → uart_open → uart_exchange（写+读一步完成）→ uart_close。
+典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data}（写+读一步完成）→ uart_close {port}。
+
+多端口：
+- 支持同时打开多个串口；端口名（如 "COM3" / "/dev/ttyUSB0"）就是句柄，
+  除 uart_list_ports 外的每个工具都需要传 port 参数。
+- 重复打开同一端口会报错，请先 uart_close 再打开。
 
 数据表示：
 - 二进制一律用 hex 字符串传递（如 "41 54 0D 0A"），每字节两个大写十六进制字符、空格分隔；
@@ -75,6 +80,8 @@ pub struct OpenArgs {
 /// 串口工具参数：uart_configure（全部可选，仅更新传入项）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConfigureArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
     /// 波特率。
     pub baudrate: Option<u32>,
     /// 数据位（5-8）。
@@ -92,6 +99,8 @@ pub struct ConfigureArgs {
 /// 串口工具参数：uart_write。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct WriteArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
     /// 要发送的数据（hex 字符串或文本，取决于 mode）。
     pub data: String,
     /// 数据编码：hex（默认）或 text。
@@ -101,6 +110,8 @@ pub struct WriteArgs {
 /// 串口工具参数：uart_read。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
     /// 空闲判定阈值（毫秒）：出现新数据后持续该时长无新字节即返回，默认 300。
     pub idle_ms: Option<u64>,
     /// 未读字节数达到该值立即返回（防堆积），默认 65536。
@@ -114,6 +125,8 @@ pub struct ReadArgs {
 /// 串口工具参数：uart_exchange。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExchangeArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
     /// 要发送的数据（hex 字符串或文本，取决于 mode）。
     pub data: String,
     /// 发送编码：hex（默认）或 text。
@@ -126,6 +139,35 @@ pub struct ExchangeArgs {
     pub timeout_ms: Option<u64>,
     /// 返回编码：hex（默认）或 text。
     pub read_mode: Option<String>,
+}
+
+/// 串口工具参数：uart_available。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AvailableArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+}
+
+/// 串口工具参数：uart_clear。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ClearArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+}
+
+/// 串口工具参数：uart_close。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CloseArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+}
+
+fn require_port(port: &str) -> Result<(), McpError> {
+    if port.trim().is_empty() {
+        Err(McpError::invalid_params("port 不能为空", None))
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_mode(s: &str) -> Result<(), String> {
@@ -198,15 +240,15 @@ impl Ser2Mcp {
     /// 打开串口并启动后台读线程（持续把上行数据囤积进环形缓冲）。
     /// 参数：port 必填；baudrate=115200、data_bits=8、parity=none、stop_bits=1、
     /// flow_control=none、read_timeout_ms=100、buffer_size=1048576（覆盖最旧+溢出计数）、
-    /// discard_on_open=true。若已有打开的串口会先关闭再打开。
-    #[tool(description = "打开串口并启动后台读线程。返回当前配置。")]
+    /// discard_on_open=true。支持同时打开多个串口；同一端口重复打开会报错。
+    #[tool(
+        description = "打开串口并启动后台读线程。支持同时打开多个串口（端口名即句柄）；返回当前配置。"
+    )]
     async fn uart_open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
     ) -> Result<CallToolResult, McpError> {
-        if args.port.trim().is_empty() {
-            return Err(McpError::invalid_params("port 不能为空", None));
-        }
+        require_port(&args.port)?;
         let baudrate = match args.baudrate.map(manager::parse_baudrate) {
             Some(Ok(v)) => v,
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
@@ -252,7 +294,7 @@ impl Ser2Mcp {
             discard_on_open,
         ) {
             Ok(()) => {
-                let info = self.manager.available();
+                let info = self.manager.available(&args.port);
                 tracing::info!(port = %args.port, baudrate, "串口已打开");
                 Ok(CallToolResult::structured(json!(info)))
             }
@@ -262,12 +304,13 @@ impl Ser2Mcp {
 
     /// 运行时重配置已打开的串口（仅更新传入的参数项）。
     #[tool(
-        description = "运行时重配置已打开的串口：baudrate / data_bits / parity / stop_bits / flow_control / read_timeout_ms，仅更新传入项。"
+        description = "运行时重配置已打开的串口（port 必填）：baudrate / data_bits / parity / stop_bits / flow_control / read_timeout_ms，仅更新传入项。"
     )]
     async fn uart_configure(
         &self,
         Parameters(args): Parameters<ConfigureArgs>,
     ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
         let baudrate = match args.baudrate.map(manager::parse_baudrate) {
             Some(Ok(v)) => Some(v),
             Some(Err(e)) => return Err(McpError::invalid_params(e, None)),
@@ -300,6 +343,7 @@ impl Ser2Mcp {
         match self
             .manager
             .configure(
+                &args.port,
                 baudrate,
                 data_bits,
                 parity,
@@ -309,19 +353,22 @@ impl Ser2Mcp {
             )
             .await
         {
-            Ok(()) => Ok(CallToolResult::structured(json!(self.manager.available()))),
+            Ok(()) => Ok(CallToolResult::structured(json!(
+                self.manager.available(&args.port)
+            ))),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
 
     /// 向串口发送数据（只发不等回复），返回实际写入字节数。
     #[tool(
-        description = "向串口发送数据并立即返回（不等待回复）；如需发送+读取请用 uart_exchange。"
+        description = "向串口发送数据并立即返回（port 必填，不等待回复）；如需发送+读取请用 uart_exchange。"
     )]
     async fn uart_write(
         &self,
         Parameters(args): Parameters<WriteArgs>,
     ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
         let mode = args.mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
@@ -330,7 +377,7 @@ impl Ser2Mcp {
             Ok(d) => d,
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
-        match self.manager.write(&data).await {
+        match self.manager.write(&args.port, &data).await {
             Ok(written) => Ok(CallToolResult::structured(json!({
                 "written": written,
                 "mode": mode,
@@ -343,12 +390,13 @@ impl Ser2Mcp {
     /// 未读字节数达 max_bytes、或总等待超时 timeout_ms（默认 5000ms）时返回全部未读数据。
     /// 返回值含 overflow_delta/overflow_total（缓冲溢出被覆盖丢弃的字节数，>0 表示数据有缺口）。
     #[tool(
-        description = "读取串口上行缓冲（后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。"
+        description = "读取串口上行缓冲（port 必填；后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。"
     )]
     async fn uart_read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
@@ -356,7 +404,11 @@ impl Ser2Mcp {
         if let Err(e) = parse_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        match self.manager.read(idle_ms, max_bytes, timeout_ms).await {
+        match self
+            .manager
+            .read(&args.port, idle_ms, max_bytes, timeout_ms)
+            .await
+        {
             Ok(outcome) => {
                 let (data, used_mode) = encode_recv(&outcome.data, &mode);
                 Ok(CallToolResult::structured(json!({
@@ -375,12 +427,13 @@ impl Ser2Mcp {
 
     /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复。对大多数 AT 命令/查询场景最常用。
     #[tool(
-        description = "发送数据并等待回复（uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。"
+        description = "发送数据并等待回复（port 必填；uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。"
     )]
     async fn uart_exchange(
         &self,
         Parameters(args): Parameters<ExchangeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
         let mode = args.mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
@@ -396,8 +449,12 @@ impl Ser2Mcp {
         if let Err(e) = parse_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        match self.manager.write(&data).await {
-            Ok(written) => match self.manager.read(idle_ms, max_bytes, timeout_ms).await {
+        match self.manager.write(&args.port, &data).await {
+            Ok(written) => match self
+                .manager
+                .read(&args.port, idle_ms, max_bytes, timeout_ms)
+                .await
+            {
                 Ok(outcome) => {
                     let (resp, used_mode) = encode_recv(&outcome.data, &read_mode);
                     Ok(CallToolResult::structured(json!({
@@ -419,23 +476,39 @@ impl Ser2Mcp {
 
     /// 查询串口状态：是否打开、当前配置、缓冲未读字节数、累计溢出字节数、读线程错误等。
     #[tool(
-        description = "查询串口运行状态与缓冲统计（open、配置、buffered_bytes、overflow_total、read_error）。"
+        description = "查询指定串口的运行状态与缓冲统计（port 必填；open、配置、buffered_bytes、overflow_total、read_error）。"
     )]
-    async fn uart_available(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::structured(json!(self.manager.available())))
+    async fn uart_available(
+        &self,
+        Parameters(args): Parameters<AvailableArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        Ok(CallToolResult::structured(json!(
+            self.manager.available(&args.port)
+        )))
     }
 
     /// 清空缓冲中未读取的上行数据。
-    #[tool(description = "清空环形缓冲中未读取的上行数据，返回清掉的字节数。")]
-    async fn uart_clear(&self) -> Result<CallToolResult, McpError> {
-        let cleared = self.manager.clear();
-        Ok(CallToolResult::structured(json!({ "cleared": cleared })))
+    #[tool(description = "清空指定串口环形缓冲中未读取的上行数据（port 必填），返回清掉的字节数。")]
+    async fn uart_clear(
+        &self,
+        Parameters(args): Parameters<ClearArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        match self.manager.clear(&args.port) {
+            Ok(cleared) => Ok(CallToolResult::structured(json!({ "cleared": cleared }))),
+            Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
+        }
     }
 
     /// 关闭串口：停止并回收后台读线程，释放端口句柄。
-    #[tool(description = "关闭串口并释放端口（后续可重新 uart_open）。")]
-    async fn uart_close(&self) -> Result<CallToolResult, McpError> {
-        match self.manager.close().await {
+    #[tool(description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。")]
+    async fn uart_close(
+        &self,
+        Parameters(args): Parameters<CloseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        match self.manager.close(&args.port).await {
             Ok(()) => Ok(CallToolResult::structured(json!({ "closed": true }))),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }

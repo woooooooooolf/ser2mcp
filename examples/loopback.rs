@@ -83,8 +83,8 @@ fn loopback(port: &str, baudrate: u32) {
 
     let rt = tokio::runtime::Runtime::new().expect("创建运行时失败");
     let outcome = rt.block_on(async {
-        let _ = mgr.write(&payload).await?;
-        mgr.read(500, 64 * 1024, 3000).await
+        let _ = mgr.write(port, &payload).await?;
+        mgr.read(port, 500, 64 * 1024, 3000).await
     });
 
     match outcome {
@@ -116,7 +116,7 @@ fn loopback(port: &str, baudrate: u32) {
                 eprintln!("收到: {recv_hex}");
                 std::process::exit(1);
             }
-            let _ = rt.block_on(mgr.close());
+            let _ = rt.block_on(mgr.close(port));
         }
         Err(e) => {
             eprintln!("读取失败: {e}");

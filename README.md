@@ -85,6 +85,18 @@ cargo test              # 单元 + 端到端 MCP 协议测试（无需串口硬�
 cargo doc --no-deps     # 生成 Rust 文档
 ```
 
+## 命令行
+
+下载预编译二进制或构建完成后，可直接运行：
+
+```bash
+ser2mcp --list-ports   # 枚举本机串口
+ser2mcp --version      # 显示版本号
+ser2mcp --help         # 显示帮助
+```
+
+不带参数运行即进入 MCP stdio 服务模式（供 AI 助手调用）。
+
 ## 接入 MCP 客户端
 
 MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json` / Claude Desktop 等）：
@@ -113,14 +125,16 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | 工具 | 说明 |
 |---|---|
 | `uart_list_ports` | 枚举本机可用串口（名称/类型/USB 描述） |
-| `uart_open` | 打开串口并启动后台读线程（含全部串口参数 + `buffer_size` 等内部参数） |
-| `uart_configure` | 运行时重配置（仅更新传入项） |
-| `uart_write` | 发送数据，立即返回（不等回复） |
-| `uart_read` | 拉取上行缓冲 |
-| `uart_exchange` | 发送 + 读取一步完成（最常用） |
-| `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误 |
-| `uart_clear` | 清空未读缓冲 |
-| `uart_close` | 关闭串口并释放句柄 |
+| `uart_open` | 打开串口并启动后台读线程（`port` 必填；含全部串口参数 + `buffer_size` 等内部参数） |
+| `uart_configure` | 运行时重配置（`port` 必填，仅更新传入项） |
+| `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
+| `uart_read` | 拉取上行缓冲（`port` 必填） |
+| `uart_exchange` | 发送 + 读取一步完成（`port` 必填，最常用） |
+| `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误（`port` 必填） |
+| `uart_clear` | 清空未读缓冲（`port` 必填） |
+| `uart_close` | 关闭串口并释放句柄（`port` 必填） |
+
+> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析、匹配或过滤，非预期数据也会原样返回，由 AI 与上层自行判断。
 
 ### 读取语义（核心设计）
 
@@ -151,9 +165,9 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 ```
 1. uart_list_ports                      → 找到 "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
-3. uart_exchange {data: "41 54 0D 0A"}  → 发 "AT\r\n"，等回复
-4. uart_configure {baudrate: 9600}      → 设备切换波特率后重配置
-5. uart_close
+3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → 发 "AT\r\n"，等回复
+4. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
+5. uart_close {port: "COM3"}
 ```
 
 ## 回环自测（真实硬件，TX-RX 短接）
@@ -190,6 +204,13 @@ examples/
 ## 安全提示
 
 ser2mcp 会把串口的读写能力直接交给 AI 助手：已授权的 MCP 客户端（以及背后的模型）可以向串口设备发送任意字节。请只连接你信任的设备，并确保 MCP 客户端与模型来源可信；不要把该工具用于可能因错误指令而损坏的设备。
+
+## 常见问题
+
+- **Linux 下提示权限不足 / 无法打开 `/dev/ttyUSB0`**：当前用户不在 `dialout`（或 `uucp`）组。以 root 运行 `scripts/linux-serial-permissions.sh`，注销并重新登录后生效。
+- **端口打开失败 / 提示已被占用**：确认没有其他串口终端或 MCP 实例占用该端口。
+- **Windows 下枚举不到串口**：检查 CH340 / CP210x 等 USB 转串口驱动是否已安装。
+- **数据不完整或缺失**：返回值 `overflow_delta > 0` 表示缓冲溢出丢数据，应调大 `buffer_size` 或减小拉取间隔。
 
 ## License
 

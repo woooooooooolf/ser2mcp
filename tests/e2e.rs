@@ -98,16 +98,24 @@ async fn e2e_tool_registration_and_errors() {
     assert!(ports.is_array());
 
     // 3. uart_available：未打开时 open=false
-    let r = call(&client, "uart_available", json!({}))
-        .await
-        .expect("available 调用失败");
+    let r = call(
+        &client,
+        "uart_available",
+        json!({"port": "COM_SER2MCP_NONEXISTENT"}),
+    )
+    .await
+    .expect("available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false));
 
     // 4. uart_read 未打开 → 工具级错误（结构化 error）
-    let r = call(&client, "uart_read", json!({"timeout_ms": 100}))
-        .await
-        .expect("read 调用失败");
+    let r = call(
+        &client,
+        "uart_read",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "timeout_ms": 100}),
+    )
+    .await
+    .expect("read 调用失败");
     assert!(r.is_error.unwrap_or(false));
     assert!(
         structured_error_of(&r)
@@ -116,20 +124,33 @@ async fn e2e_tool_registration_and_errors() {
     );
 
     // 5. uart_write 未打开 → 工具级错误
-    let r = call(&client, "uart_write", json!({"data": "41"}))
-        .await
-        .expect("write 调用失败");
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "41"}),
+    )
+    .await
+    .expect("write 调用失败");
     assert!(r.is_error.unwrap_or(false));
 
     // 6. 参数校验：非法 hex → 协议级 invalid_params（call_tool 返回 Err）
-    let r = call(&client, "uart_write", json!({"data": "zz"})).await;
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "zz"}),
+    )
+    .await;
     assert!(r.is_err(), "非法 hex 应触发 invalid_params: {r:?}");
 
     // 7. 参数校验：非法 mode → 协议级错误
     let r = call(
         &client,
         "uart_read",
-        json!({"mode": "base64", "timeout_ms": 100}),
+        json!({
+            "port": "COM_SER2MCP_NONEXISTENT",
+            "mode": "base64",
+            "timeout_ms": 100
+        }),
     )
     .await;
     assert!(r.is_err(), "非法 mode 应触发 invalid_params");
@@ -146,11 +167,25 @@ async fn e2e_tool_registration_and_errors() {
     assert!(structured_error_of(&r).is_some());
 
     // 9. 打开失败后状态仍为未打开
-    let r = call(&client, "uart_available", json!({}))
-        .await
-        .expect("available 调用失败");
+    let r = call(
+        &client,
+        "uart_available",
+        json!({"port": "COM_SER2MCP_NONEXISTENT"}),
+    )
+    .await
+    .expect("available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false));
+
+    // 10. uart_close 未打开 → 工具级错误
+    let r = call(
+        &client,
+        "uart_close",
+        json!({"port": "COM_SER2MCP_NONEXISTENT"}),
+    )
+    .await
+    .expect("close 调用失败");
+    assert!(r.is_error.unwrap_or(false));
 
     client.cancel().await.expect("关闭客户端失败");
 }

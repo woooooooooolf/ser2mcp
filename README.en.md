@@ -85,6 +85,18 @@ cargo test              # unit + end-to-end MCP protocol tests (no serial hardwa
 cargo doc --no-deps     # generate Rust docs
 ```
 
+## Command Line
+
+After downloading a prebuilt binary or building from source, you can run:
+
+```bash
+ser2mcp --list-ports   # enumerate local serial ports
+ser2mcp --version      # show version
+ser2mcp --help         # show help
+```
+
+Running without arguments starts the MCP server in stdio mode (for AI assistants).
+
 ## Connecting to MCP Clients
 
 MCP clients launch the server as a stdio subprocess. Generic configuration (`.mcp.json`, Claude Desktop, etc.):
@@ -113,14 +125,16 @@ Environment variables (optional):
 | Tool | Description |
 |---|---|
 | `uart_list_ports` | Enumerate local serial ports (name / type / USB description) |
-| `uart_open` | Open a port and start the background reader thread (all serial parameters + internal params like `buffer_size`) |
-| `uart_configure` | Re-configure a running port (only updates passed fields) |
-| `uart_write` | Send data, return immediately (no reply waiting) |
-| `uart_read` | Pull buffered ingress data |
-| `uart_exchange` | Send + read in one step (most common) |
-| `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors |
-| `uart_clear` | Clear unread buffered data |
-| `uart_close` | Close the port and release the handle |
+| `uart_open` | Open a port and start the background reader thread (`port` required; all serial parameters + internal params like `buffer_size`) |
+| `uart_configure` | Re-configure a running port (`port` required; only updates passed fields) |
+| `uart_write` | Send data, return immediately (`port` required; no reply waiting) |
+| `uart_read` | Pull buffered ingress data (`port` required) |
+| `uart_exchange` | Send + read in one step (`port` required; most common) |
+| `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors (`port` required) |
+| `uart_clear` | Clear unread buffered data (`port` required) |
+| `uart_close` | Close the port and release the handle (`port` required) |
+
+> **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse, match or filter content, so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
 ### Read Semantics (Core Design)
 
@@ -151,9 +165,9 @@ Example return value:
 ```
 1. uart_list_ports                      → find "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
-3. uart_exchange {data: "41 54 0D 0A"}  → send "AT\r\n", wait for reply
-4. uart_configure {baudrate: 9600}      → re-configure after device baudrate switch
-5. uart_close
+3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → send "AT\r\n", wait for reply
+4. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
+5. uart_close {port: "COM3"}
 ```
 
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
@@ -190,6 +204,13 @@ examples/
 ## Security Notice
 
 ser2mcp gives AI assistants direct read/write access to your serial ports: any authorized MCP client (and the model behind it) can send arbitrary bytes to connected devices. Only connect devices you trust, make sure your MCP client and model are from reliable sources, and do not use this tool with devices that could be damaged by incorrect commands.
+
+## Troubleshooting
+
+- **Permission denied / cannot open `/dev/ttyUSB0` on Linux**: your user is not in the `dialout` (or `uucp`) group. Run `scripts/linux-serial-permissions.sh` as root, then log out and back in.
+- **Port open failure / port busy**: make sure no other serial terminal or MCP instance is using the port.
+- **No ports found on Windows**: check that the USB-to-serial driver (CH340 / CP210x, etc.) is installed.
+- **Missing / incomplete data**: `overflow_delta > 0` means data was dropped due to buffer overflow; increase `buffer_size` or pull data more frequently.
 
 ## License
 

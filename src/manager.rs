@@ -1,4 +1,5 @@
 //! 串口管理器：打开/配置/后台读线程/写/读取。
+//! 支持同时打开多个串口，以端口名为句柄；工具调用全局串行化（AI 回合制调用天然串行）。
 //!
 //! 架构：
 //! ```text
@@ -8,6 +9,7 @@
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
 //! - 所有写/读/配置操作经 `io_lock` 串行化，保证 AI 回合制调用下语义清晰。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -190,16 +192,16 @@ struct ActivePort {
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     read_error: Arc<Mutex<Option<String>>>,
+    /// 上次读取时的累计溢出计数（用于计算增量），随端口生命周期存在。
+    last_overflow: Arc<Mutex<u64>>,
 }
 
 /// 串口管理器。
 #[derive(Default)]
 pub struct SerialManager {
-    inner: Mutex<Option<ActivePort>>,
+    ports: Mutex<HashMap<String, ActivePort>>,
     /// 串行化 write/read/configure 工具调用。
     io_lock: tokio::sync::Mutex<()>,
-    /// 上次读取时的累计溢出计数（用于计算增量）。
-    last_overflow: Mutex<u64>,
 }
 
 impl SerialManager {
@@ -235,7 +237,7 @@ impl SerialManager {
             .collect())
     }
 
-    /// 打开串口并启动后台读线程。若已有连接则先关闭。
+    /// 打开串口并启动后台读线程。同一端口重复打开会报错（先 close 再 open）。
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
@@ -249,8 +251,10 @@ impl SerialManager {
         buffer_size: usize,
         discard_on_open: bool,
     ) -> Result<(), String> {
-        // 先关闭已有连接（同步完成，无需 io_lock）。
-        self.close_sync();
+        // 同一端口重复打开会报错，避免误覆盖其它会话。
+        if self.ports.lock().unwrap().contains_key(port_name) {
+            return Err(format!("端口 {port_name} 已打开，请先调用 uart_close"));
+        }
 
         let builder = serialport::new(port_name, baudrate);
         let port = builder
@@ -312,31 +316,36 @@ impl SerialManager {
             })
             .map_err(|e| format!("启动读线程失败: {e}"))?;
 
-        let mut inner = self.inner.lock().unwrap();
-        *inner = Some(ActivePort {
-            port,
-            config: PortConfig {
-                baudrate,
-                data_bits,
-                parity,
-                stop_bits,
-                flow_control,
-                read_timeout_ms,
-                buffer_size,
+        let mut ports = self.ports.lock().unwrap();
+        ports.insert(
+            port_name.to_string(),
+            ActivePort {
+                port,
+                config: PortConfig {
+                    baudrate,
+                    data_bits,
+                    parity,
+                    stop_bits,
+                    flow_control,
+                    read_timeout_ms,
+                    buffer_size,
+                },
+                port_name: port_name.to_string(),
+                buffer,
+                stop,
+                reader: Some(reader),
+                read_error,
+                last_overflow: Arc::new(Mutex::new(0)),
             },
-            port_name: port_name.to_string(),
-            buffer,
-            stop,
-            reader: Some(reader),
-            read_error,
-        });
-        *self.last_overflow.lock().unwrap() = 0;
+        );
         Ok(())
     }
 
     /// 运行时重配置（仅更新传入的项）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn configure(
         &self,
+        port_name: &str,
         baudrate: Option<u32>,
         data_bits: Option<DataBits>,
         parity: Option<Parity>,
@@ -345,8 +354,10 @@ impl SerialManager {
         read_timeout_ms: Option<u64>,
     ) -> Result<(), String> {
         let _guard = self.io_lock.lock().await;
-        let mut inner = self.inner.lock().unwrap();
-        let ap = inner.as_mut().ok_or("串口未打开，请先调用 uart_open")?;
+        let mut ports = self.ports.lock().unwrap();
+        let ap = ports
+            .get_mut(port_name)
+            .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
         {
             let mut port = ap.port.lock().unwrap();
             if let Some(v) = baudrate {
@@ -384,10 +395,12 @@ impl SerialManager {
     }
 
     /// 写入数据（只发不等），返回实际写入字节数。
-    pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
+    pub async fn write(&self, port_name: &str, data: &[u8]) -> Result<usize, String> {
         let _guard = self.io_lock.lock().await;
-        let inner = self.inner.lock().unwrap();
-        let ap = inner.as_ref().ok_or("串口未打开，请先调用 uart_open")?;
+        let ports = self.ports.lock().unwrap();
+        let ap = ports
+            .get(port_name)
+            .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
         let mut port = ap.port.lock().unwrap();
         let mut written = 0;
         while written < data.len() {
@@ -403,15 +416,18 @@ impl SerialManager {
     /// 拉取缓冲：等待"空闲判定 / 达到 max_bytes / 超时"三者之一后返回全部未读数据。
     pub async fn read(
         &self,
+        port_name: &str,
         idle_ms: u64,
         max_bytes: usize,
         timeout_ms: u64,
     ) -> Result<ReadOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (buffer, _port_name) = {
-            let inner = self.inner.lock().unwrap();
-            let ap = inner.as_ref().ok_or("串口未打开，请先调用 uart_open")?;
-            (ap.buffer.clone(), ap.port_name.clone())
+        let (buffer, last_overflow) = {
+            let ports = self.ports.lock().unwrap();
+            let ap = ports
+                .get(port_name)
+                .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            (ap.buffer.clone(), ap.last_overflow.clone())
         };
         let idle = Duration::from_millis(idle_ms);
         let timeout = Duration::from_millis(timeout_ms);
@@ -437,7 +453,7 @@ impl SerialManager {
         };
 
         let (data, overflow_total) = buffer.take_all();
-        let mut last = self.last_overflow.lock().unwrap();
+        let mut last = last_overflow.lock().unwrap();
         let overflow_delta = overflow_total.saturating_sub(*last);
         *last = overflow_total;
         let (buffered, _) = buffer.stats();
@@ -452,9 +468,9 @@ impl SerialManager {
     }
 
     /// 运行状态快照。
-    pub fn available(&self) -> AvailableInfo {
-        let inner = self.inner.lock().unwrap();
-        match inner.as_ref() {
+    pub fn available(&self, port_name: &str) -> AvailableInfo {
+        let ports = self.ports.lock().unwrap();
+        match ports.get(port_name) {
             None => AvailableInfo {
                 open: false,
                 port: None,
@@ -491,35 +507,31 @@ impl SerialManager {
     }
 
     /// 清空缓冲中的未读数据，返回清掉的字节数。
-    pub fn clear(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
-        match inner.as_ref() {
-            None => 0,
-            Some(ap) => {
-                let (bytes, _) = ap.buffer.stats();
-                ap.buffer.clear();
-                bytes
-            }
-        }
+    pub fn clear(&self, port_name: &str) -> Result<usize, String> {
+        let ports = self.ports.lock().unwrap();
+        let ap = ports
+            .get(port_name)
+            .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+        let (bytes, _) = ap.buffer.stats();
+        ap.buffer.clear();
+        Ok(bytes)
     }
 
     /// 关闭串口（异步：先停读线程并 join，再释放端口句柄）。
-    pub async fn close(&self) -> Result<(), String> {
-        self.close_sync();
-        Ok(())
-    }
-
-    fn close_sync(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(ap) = inner.take() {
-            ap.stop.store(true, Ordering::Relaxed);
-            if let Some(handle) = ap.reader {
-                // 读线程至多 read_timeout 内返回；此处短暂阻塞可接受。
-                let _ = handle.join();
-            }
-            // 读线程已退出，此处 drop ap 释放端口句柄（Windows 上安全）。
+    pub async fn close(&self, port_name: &str) -> Result<(), String> {
+        let ap = self
+            .ports
+            .lock()
+            .unwrap()
+            .remove(port_name)
+            .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+        ap.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = ap.reader {
+            // 读线程至多 read_timeout 内返回；此处短暂阻塞可接受。
+            let _ = handle.join();
         }
-        *self.last_overflow.lock().unwrap() = 0;
+        // 读线程已退出，此处 drop ap 释放端口句柄（Windows 上安全）。
+        Ok(())
     }
 }
 
