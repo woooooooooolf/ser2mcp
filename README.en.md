@@ -5,7 +5,7 @@
 
 **English** | [简体中文](README.md)
 
-**UART serial port MCP server**: exposes local serial port devices as standard **MCP (Model Context Protocol)** tools, so AI assistants (Reasonix, Claude Desktop, Cursor, or any MCP client) can read and write serial ports directly.
+**UART serial port MCP server**: exposes local serial port devices as standard **MCP (Model Context Protocol)** tools, so AI assistants (Claude Desktop, Cursor, or any MCP client) can read and write serial ports directly.
 
 ```mermaid
 flowchart LR
@@ -75,13 +75,6 @@ MCP clients launch the server as a stdio subprocess. Generic configuration (`.mc
 ```
 
 Windows example: `"command": "C:\\tools\\ser2mcp.exe"`.
-Reasonix project configuration (`reasonix.toml`) example:
-
-```toml
-[[plugins]]
-name    = "ser2mcp"
-command = "/absolute/path/to/ser2mcp"
-```
 
 Environment variables (optional):
 

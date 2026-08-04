@@ -5,7 +5,7 @@
 
 简体中文 | [English](README.en.md)
 
-**UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Reasonix、Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
+**UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
 
 ```mermaid
 flowchart LR
@@ -75,13 +75,6 @@ MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json
 ```
 
 Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
-Reasonix 项目配置（`reasonix.toml`）示例：
-
-```toml
-[[plugins]]
-name    = "ser2mcp"
-command = "/absolute/path/to/ser2mcp"
-```
 
 环境变量（可选）：
 

@@ -1,7 +1,7 @@
 //! # ser2mcp
 //!
 //! **UART 串口 MCP 服务器**：把本地串口设备封装成标准的 [MCP (Model Context Protocol)]
-//! 工具，让 AI 助手（Reasonix、Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
+//! 工具，让 AI 助手（Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
 //!
 //! [MCP (Model Context Protocol)]: https://modelcontextprotocol.io
 //!
