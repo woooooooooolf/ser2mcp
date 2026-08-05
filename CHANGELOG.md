@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- 修复 `uart_exchange` / `uart_read` 在大块数据流下的 idle 误判提前返回（[#2](https://github.com/woooooooooolf/ser2mcp/issues/2)）：空闲判定除环形缓冲 `idle_ms` 无新写入外，还需串口驱动侧无可读字节（`bytes_to_read() == 0`），避免读线程在"驱动缓冲排空后、剩余数据仍在线路/USB 传输中"的窗口期（Windows 实测可达数百 ms）被误判为响应结束、残留数据污染下一次调用（实测复现率 8/10 → 0/10）
+- Windows 读线程使用独立短读超时（100ms，仅作为 `bytes_to_read()` 与 `ReadFile` 竞态的兜底），不再受用户配置的 `read_timeout_ms`（默认 500ms）影响；Unix（Linux/macOS）读线程仍为 `poll(2)` 事件驱动，行为不变
+
 ## [0.3.0] - 2026-08-04
 
 ### Added

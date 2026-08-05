@@ -400,6 +400,12 @@ impl SerialManager {
     }
 
     /// 拉取缓冲：等待"空闲判定 / 达到 max_bytes / 超时"三者之一后返回全部未读数据。
+    ///
+    /// 空闲判定（跨平台）增强：除环形缓冲 `idle_ms` 无新写入外，还要求串口驱动
+    /// 侧无可读字节（`bytes_to_read() == 0`）。这避免读线程在"驱动缓冲排空后、
+    /// 剩余数据仍在线路/USB 传输中"的窗口期（Windows 实测可达数百 ms）被误判为
+    /// 响应结束，从而把"数据流中"当作"响应已结束"。Unix 读线程为 poll 事件驱动，
+    /// 该检查同样安全（更保守，不会误判提前返回）。
     pub async fn read(
         &self,
         port_name: &str,
@@ -408,12 +414,12 @@ impl SerialManager {
         timeout_ms: u64,
     ) -> Result<ReadOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (buffer, last_overflow) = {
+        let (buffer, last_overflow, port) = {
             let ports = self.ports.lock().unwrap();
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-            (ap.buffer.clone(), ap.last_overflow.clone())
+            (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
         let idle = Duration::from_millis(idle_ms);
         let timeout = Duration::from_millis(timeout_ms);
@@ -423,7 +429,17 @@ impl SerialManager {
             let (cur_len, _) = buffer.stats();
             let age = buffer.last_write_age();
             if cur_len > 0 && age >= idle {
-                break ReadReason::Idle;
+                // 串口驱动缓冲是否仍有未搬入环形缓冲的数据（读线程尚未读完）。
+                // 端口拔出/驱动故障时传播错误，避免把故障误判为"响应结束"。
+                let drv_empty = {
+                    let p = port.lock().unwrap();
+                    p.bytes_to_read()
+                        .map_err(|e| format!("查询串口可读字节数失败: {e}"))?
+                        == 0
+                };
+                if drv_empty {
+                    break ReadReason::Idle;
+                }
             }
             if cur_len >= max_bytes {
                 break ReadReason::MaxBytes;
