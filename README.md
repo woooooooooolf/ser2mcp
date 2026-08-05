@@ -115,22 +115,22 @@ MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json
 
 Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
-### 以 Reasonix MCP 组件安装（kind=mcp）
+### 以 Reasonix 插件包安装（推荐，零手动配置）
 
-在 Reasonix 中对该仓库执行：
+在 Reasonix 中执行：
 
-> Install this Reasonix mcp server from the repository's `.mcp.json`: https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json. Use install_source with kind="mcp".
+> Install the ser2mcp plugin package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="auto" (or "plugin").
 
-仓库根目录的 `.mcp.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
+仓库根目录的 `reasonix-plugin.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
 
-1. **先把仓库放到本机固定位置**（例如 `git clone` 到 `C:\tools\ser2mcp`，或从 Releases 下载二进制放入该目录）——`.mcp.json` 只声明了相对路径 `bin/ser2mcp.cmd`，安装后需要手动改成指向本机的绝对路径
-2. 在 Reasonix 中执行安装（`install_source`，kind=mcp）：**源请填写仓库内 `.mcp.json` 的 URL**，即 `https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json`。注意不要填仓库主页 URL（`https://github.com/woooooooooolf/ser2mcp`）——它会被误判为 HTTP 端点而不是 stdio 服务器
+1. 在 Reasonix 中执行 `install_source`：**源填仓库 URL** `https://github.com/woooooooooolf/ser2mcp`，kind 用 `auto`（自动识别为插件包）或显式 `plugin`，scope 默认 `global`
+2. Reasonix 把整个仓库复制到自己的全局插件目录（Windows 为 `%APPDATA%\reasonix\plugins\ser2mcp`），manifest 里的 `command`（相对路径 `bin/ser2mcp.cmd`）按插件包根目录解析——**无需手动改任何路径**
 3. 安装后自动注册名为 `ser2mcp` 的 MCP 服务器，工具以 `mcp__ser2mcp__uart_*` 暴露
-4. **注意**：`kind=mcp` 安装时 `.mcp.json` 中的 `command` 是原样写入配置的，**不会自动拼接仓库路径**——请把已注册的服务器配置里的 `command` 改为本机绝对路径：
-   - Windows：`C:\tools\ser2mcp\bin\ser2mcp.exe`（或 `ser2mcp.cmd`，二者等价）
-   - Linux：`/opt/ser2mcp/bin/ser2mcp`　macOS：`/opt/ser2mcp/bin/ser2mcp-macos`
-   - 仓库内的 `bin/ser2mcp.cmd` 为跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`；注意保持纯 ASCII，cmd.exe 在非 UTF-8 代码页下解析非 ASCII 字节会出错）
-5. **验证**：注册后调用 `uart_list_ports`，应返回本机串口列表（可能为空数组）
+4. **验证**：调用 `uart_list_ports`，应返回本机串口列表（可能为空数组）
+
+> `bin/ser2mcp.cmd` 是跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`；注意保持纯 ASCII，cmd.exe 在非 UTF-8 代码页下解析非 ASCII 字节会出错）。
+>
+> 离线安装：也可用 `install_source` 的本地路径作为源（本地仓库目录或解压后的 release 包目录），同样按插件包方式安装。
 
 环境变量（可选）：
 

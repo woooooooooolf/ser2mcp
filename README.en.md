@@ -115,22 +115,22 @@ MCP clients launch the server as a stdio subprocess. Generic configuration (`.mc
 
 Windows example: `"command": "C:\\tools\\ser2mcp.exe"`.
 
-### Install as a Reasonix MCP component (kind=mcp)
+### Install as a Reasonix plugin package (recommended, zero manual config)
 
-In Reasonix, install this repository as an MCP component:
+In Reasonix, install the repository as a plugin package:
 
-> Install this Reasonix mcp server from the repository's `.mcp.json`: https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json. Use install_source with kind="mcp".
+> Install the ser2mcp plugin package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="auto" (or "plugin").
 
-The root `.mcp.json` declares ser2mcp as a standard MCP server (`bin/` ships prebuilt Windows / Linux / macOS binaries plus a cross-platform launcher script):
+The root `reasonix-plugin.json` declares ser2mcp as a standard MCP server (`bin/` ships prebuilt Windows / Linux / macOS binaries plus a cross-platform launcher script):
 
-1. **First place the repository at a fixed local path** (e.g. `git clone` to `C:\tools\ser2mcp`, or download a release binary into that directory) — `.mcp.json` only declares the relative path `bin/ser2mcp.cmd`, and you must point the registered server config at an absolute path afterwards
-2. Run the install in Reasonix (`install_source`, kind=mcp): **point the source at the `.mcp.json` file inside the repository**, i.e. `https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json`. Do **not** use the repository homepage URL (`https://github.com/woooooooooolf/ser2mcp`) — it is misdetected as an HTTP endpoint instead of a stdio server
+1. Run `install_source` in Reasonix: **point the source at the repository URL** `https://github.com/woooooooooolf/ser2mcp`; use kind `auto` (detected as a plugin package) or explicit `plugin`; scope defaults to `global`
+2. Reasonix copies the whole repository into its global plugin directory (Windows: `%APPDATA%\reasonix\plugins\ser2mcp`); the manifest's `command` (relative path `bin/ser2mcp.cmd`) resolves against the plugin package root — **no manual path edits needed**
 3. After install, a server named `ser2mcp` is registered; tools are exposed as `mcp__ser2mcp__uart_*`
-4. **Note**: with `kind=mcp`, the `command` from `.mcp.json` is written into the config verbatim and the repository path is **not** prepended — edit the registered server config to use an absolute path:
-   - Windows: `C:\tools\ser2mcp\bin\ser2mcp.exe` (or `ser2mcp.cmd`; equivalent)
-   - Linux: `/opt/ser2mcp/bin/ser2mcp`　macOS: `/opt/ser2mcp/bin/ser2mcp-macos`
-   - `bin/ser2mcp.cmd` is the cross-platform launcher (Unix picks `ser2mcp` / `ser2mcp-macos` via `uname`, Windows calls `ser2mcp.exe`; keep it pure ASCII — cmd.exe misparses non-ASCII bytes on non-UTF-8 code pages)
-5. **Verify**: call `uart_list_ports` after registration; it should return the local serial port list (possibly an empty array)
+4. **Verify**: call `uart_list_ports` after registration; it should return the local serial port list (possibly an empty array)
+
+> `bin/ser2mcp.cmd` is the cross-platform launcher (Unix picks `ser2mcp` / `ser2mcp-macos` via `uname`, Windows calls `ser2mcp.exe`; keep it pure ASCII — cmd.exe misparses non-ASCII bytes on non-UTF-8 code pages).
+>
+> Offline install: point `install_source` at a local path (a local clone or an extracted release package) — it installs the same plugin-package way.
 
 Environment variables (optional):
 
