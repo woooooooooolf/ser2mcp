@@ -119,7 +119,7 @@ Windows example: `"command": "C:\\tools\\ser2mcp.exe"`.
 
 In Reasonix, install this repository as an MCP component:
 
-> Install this Reasonix mcp package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="mcp".
+> Install this Reasonix mcp server from the repository's `.mcp.json`: https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json. Use install_source with kind="mcp".
 
 The root `.mcp.json` declares ser2mcp as a standard MCP server (`bin/` ships prebuilt Windows / Linux / macOS binaries plus a cross-platform launcher script):
 
