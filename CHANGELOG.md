@@ -15,13 +15,17 @@
 
 ### Fixed
 
-- 消除 Windows USB 转串口驱动（CH340/CP210x）按读超时边界成批交付数据导致的延迟尖峰：实测 `read_timeout_ms=1000` 时读写往返不再呈 ~1s 整数倍（COM9 回环中位 59ms，与默认配置一致；旧模型为 2966ms）
+- 消除 Windows USB 转串口驱动按读超时边界成批交付数据导致的延迟尖峰（该现象实测于手头的 CH340 / CP210x）：`read_timeout_ms=1000` 时读写往返不再呈 ~1s 整数倍（COM9 回环中位 59ms，与默认配置一致；旧模型为 2966ms）
+
+### Docs
+
+- README 与模块文档同步事件驱动/非阻塞读线程说明、`read_timeout_ms` 语义（默认 500ms 仅作读安全上限）与延迟调优指引
 
 ## [0.2.2] - 2026-08-04
 
 ### Changed
 
-- 默认 `read_timeout_ms` 从 100ms 调整为 10ms：Windows 上 CH340 / CP210x 等 USB 转串口驱动对阻塞读按超时边界成批交付数据，调小该值可显著降低 `uart_read` / `uart_exchange` 延迟（CH340 / CP210x 双芯片实测：1000ms 时延迟呈 ~1s 整数倍，10ms 时与直连串口相当）
+- 默认 `read_timeout_ms` 从 100ms 调整为 10ms：Windows 上 CH340 / CP210x 等 USB 转串口驱动对阻塞读按超时边界成批交付数据（实测于手头这两颗芯片），调小该值可显著降低 `uart_read` / `uart_exchange` 延迟（1000ms 时延迟呈 ~1s 整数倍，10ms 时与直连串口相当）
 
 ### Added
 

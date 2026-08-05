@@ -1,9 +1,9 @@
-//! 串口管理器：打开/配置/后台读线程/写/读取。
+//! 串口管理器：打开/配置/事件驱动读线程/写/读取。
 //! 支持同时打开多个串口，以端口名为句柄；工具调用全局串行化（AI 回合制调用天然串行）。
 //!
 //! 架构：
 //! ```text
-//! 串口 ──► 后台读线程(生产者) ──► RingBuf(有界环形缓冲) ──► uart_read/uart_exchange(消费者)
+//! 串口 ──► 事件驱动读线程(生产者) ──► RingBuf(有界环形缓冲) ──► uart_read/uart_exchange(消费者)
 //! ```
 //! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
@@ -52,7 +52,7 @@ pub struct PortConfig {
     pub stop_bits: StopBits,
     /// 流控方式。
     pub flow_control: FlowControl,
-    /// 读线程的串口读超时（毫秒）。
+    /// 读线程 `read()` 的安全上限（毫秒），不影响读写延迟。
     pub read_timeout_ms: u64,
     /// 上行环形缓冲大小（字节）。
     pub buffer_size: usize,
@@ -243,7 +243,7 @@ impl SerialManager {
             .collect())
     }
 
-    /// 打开串口并启动后台读线程。同一端口重复打开会报错（先 close 再 open）。
+    /// 打开串口并启动事件驱动读线程。同一端口重复打开会报错（先 close 再 open）。
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
@@ -287,7 +287,7 @@ impl SerialManager {
         let stop = Arc::new(AtomicBool::new(false));
         let read_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-        // 后台读线程：串口 → 环形缓冲（事件驱动/非阻塞，详见 reader 模块）。
+        // 事件驱动读线程：串口 → 环形缓冲（详见 reader 模块）。
         // 使用独立句柄，避免与命令操作（write/configure）争用同一 Mutex。
         let (event_reader, reader_stop) =
             crate::reader::EventReader::new(reader_native, buffer.clone(), stop.clone())
@@ -513,10 +513,10 @@ impl SerialManager {
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
         ap.stop.signal();
         if let Some(handle) = ap.reader {
-            // 读线程至多 read_timeout 内返回；此处短暂阻塞可接受。
+            // 停止信号会中断事件等待，join 很快返回；此处短暂阻塞可接受。
             let _ = handle.join();
         }
-        // 读线程已退出，此处 drop ap 释放端口句柄（Windows 上安全）。
+        // 读线程已退出，此处 drop ap 释放端口句柄。
         Ok(())
     }
 }

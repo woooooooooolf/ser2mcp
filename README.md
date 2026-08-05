@@ -34,7 +34,7 @@
 ```mermaid
 flowchart LR
     client["MCP 客户端<br>（AI 助手）"]
-    server["ser2mcp<br>（后台读线程+环形缓冲）"]
+    server["ser2mcp<br>（事件驱动读线程+环形缓冲）"]
     uart["UART 设备<br>（TX-RX）"]
 
     client <==>|"JSON-RPC over stdio"| server
@@ -47,7 +47,7 @@ flowchart LR
 - **完善的串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
 - **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
 - **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
-- **上行数据不丢不堵**：后台读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
+- **上行数据不丢不堵**：事件驱动/非阻塞读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本
 - **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
 
@@ -126,7 +126,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | 工具 | 说明 |
 |---|---|
 | `uart_list_ports` | 枚举本机可用串口（名称/类型/USB 描述） |
-| `uart_open` | 打开串口并启动后台读线程（`port` 必填；含全部串口参数 + `buffer_size` 等内部参数） |
+| `uart_open` | 打开串口并启动读线程（`port` 必填；含全部串口参数 + `buffer_size` 等内部参数） |
 | `uart_configure` | 运行时重配置（`port` 必填，仅更新传入项） |
 | `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
 | `uart_read` | 拉取上行缓冲（`port` 必填） |
@@ -139,7 +139,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 ### 读取语义（核心设计）
 
-串口上行数据由后台读线程**持续囤积**，工具**按需拉取**，`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
+串口上行数据由事件驱动/非阻塞读线程**持续囤积**，工具**按需拉取**，`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
 
 1. **空闲判定**：出现新数据后持续 `idle_ms`（默认 300ms）无新字节 → 视为一次响应结束（`reason: "idle"`）
 2. **达到上限**：未读字节数 ≥ `max_bytes`（默认 64 KiB）→ 防堆积（`reason: "max_bytes"`）
@@ -196,7 +196,8 @@ src/
 tests/
 └── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手）
 examples/
-└── loopback.rs  # 回环自测工具
+├── loopback.rs      # 回环自测工具
+└── latency_probe.rs # 延迟探针（bench/benchw，真实硬件压测）
 ```
 
 ## 技术栈

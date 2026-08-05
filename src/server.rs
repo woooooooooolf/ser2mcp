@@ -47,7 +47,7 @@ const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传
 - 文本模式（mode="text"）下直接传 UTF-8 字符串；返回时若数据非合法文本则自动降级为 hex。
 
 读取语义（重要）：
-- 串口上行数据由后台读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
+- 串口上行数据由事件驱动/非阻塞读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
   工具按需拉取，而非设备主动推送。
 - uart_read / uart_exchange 在三种条件下返回：① 出现新数据后持续 idle_ms 无新字节
   （视为一次响应结束，默认 300ms）；② 未读字节数达到 max_bytes（默认 64KiB）；
@@ -66,7 +66,7 @@ pub struct OpenArgs {
     pub baudrate: Option<u32>,
     /// 数据位（5-8），默认 8。
     pub data_bits: Option<u8>,
-    /// 校验位 none/even/odd/mark/space，默认 none。
+    /// 校验位 none/even/odd，默认 none。
     pub parity: Option<String>,
     /// 停止位 1 或 2，默认 1。
     pub stop_bits: Option<u8>,
@@ -91,13 +91,13 @@ pub struct ConfigureArgs {
     pub baudrate: Option<u32>,
     /// 数据位（5-8）。
     pub data_bits: Option<u8>,
-    /// 校验位 none/even/odd/mark/space。
+    /// 校验位 none/even/odd。
     pub parity: Option<String>,
     /// 停止位 1 或 2。
     pub stop_bits: Option<u8>,
     /// 流控 none/software/hardware。
     pub flow_control: Option<String>,
-    /// 读超时（毫秒）。
+    /// 读超时（毫秒，仅作读安全上限，不影响延迟）。
     pub read_timeout_ms: Option<u64>,
 }
 
@@ -242,12 +242,12 @@ impl Ser2Mcp {
         }
     }
 
-    /// 打开串口并启动后台读线程（持续把上行数据囤积进环形缓冲）。
+    /// 打开串口并启动事件驱动读线程（持续把上行数据囤积进环形缓冲）。
     /// 参数：port 必填；baudrate=115200、data_bits=8、parity=none、stop_bits=1、
     /// flow_control=none、read_timeout_ms=500、buffer_size=1048576（覆盖最旧+溢出计数）、
     /// discard_on_open=true。支持同时打开多个串口；同一端口重复打开会报错。
     #[tool(
-        description = "打开串口并启动后台读线程。支持同时打开多个串口（端口名即句柄）；返回当前配置。"
+        description = "打开串口并启动读线程。支持同时打开多个串口（端口名即句柄）；返回当前配置。"
     )]
     async fn uart_open(
         &self,
@@ -506,7 +506,7 @@ impl Ser2Mcp {
         }
     }
 
-    /// 关闭串口：停止并回收后台读线程，释放端口句柄。
+    /// 关闭串口：停止并回收读线程，释放端口句柄。
     #[tool(description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。")]
     async fn uart_close(
         &self,
