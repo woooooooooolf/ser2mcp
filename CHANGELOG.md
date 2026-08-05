@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-05
+
 ### Fixed
 
 - 修复 `uart_exchange` / `uart_read` 在大块数据流下的 idle 误判提前返回（[#2](https://github.com/woooooooooolf/ser2mcp/issues/2)）：空闲判定除环形缓冲 `idle_ms` 无新写入外，还需串口驱动侧无可读字节（`bytes_to_read() == 0`），避免读线程在"驱动缓冲排空后、剩余数据仍在线路/USB 传输中"的窗口期（Windows 实测可达数百 ms）被误判为响应结束、残留数据污染下一次调用（实测复现率 8/10 → 0/10）
@@ -81,3 +83,4 @@
 [0.2.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.1
 [0.2.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.2
 [0.3.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.3.0
+[0.4.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.4.0
