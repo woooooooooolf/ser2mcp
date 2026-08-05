@@ -16,6 +16,8 @@ use std::io;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::time::Duration;
 
 use serialport::SerialPort;
 
@@ -23,6 +25,12 @@ use crate::ring::RingBuf;
 
 /// 单次读取块大小。
 const READ_CHUNK: usize = 4096;
+/// 读线程独立读超时（仅 Windows 生效）：读线程仅在 `bytes_to_read() > 0` 时
+/// `read()`，正常应立即返回；此超时仅作为竞态兜底（如 `ClearCommError` 计数
+/// 与实际 `ReadFile` 之间的窗口），避免 `read()` 阻塞用户配置的
+/// `read_timeout_ms`（默认 500ms）而在环形缓冲写入上制造超过 idle 判定的空洞。
+#[cfg(windows)]
+const READER_READ_TIMEOUT_MS: u64 = 100;
 
 #[cfg(unix)]
 pub(crate) type NativePort = serialport::TTYPort;
@@ -58,6 +66,12 @@ impl EventReader {
         buffer: Arc<RingBuf>,
         stop: Arc<AtomicBool>,
     ) -> io::Result<(Self, ReaderStop)> {
+        // Windows：为读线程句柄设置独立短读超时（见 READER_READ_TIMEOUT_MS）。
+        // Unix 读线程走 poll(2) 事件驱动，无阻塞读超时问题，保持不动。
+        #[cfg(windows)]
+        let mut port = port;
+        #[cfg(windows)]
+        port.set_timeout(Duration::from_millis(READER_READ_TIMEOUT_MS))?;
         let (waiter, stop_imp) = imp::Waiter::new(&port)?;
         Ok((
             Self {
