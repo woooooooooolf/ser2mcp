@@ -115,12 +115,13 @@ MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json
 
 Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
-### 以 Reasonix 插件安装（推荐）
+### 以 Reasonix MCP 组件安装（kind=mcp）
 
-仓库根目录自带 `reasonix-plugin.json`，可直接作为 **Reasonix 插件包** 安装（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
+仓库根目录的 `.mcp.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
 
-1. 在 Reasonix 中执行插件安装（`install_source`，kind=plugin），源指向本仓库
+1. 在 Reasonix 中执行安装（`install_source`，kind=mcp），源指向本仓库
 2. 安装后自动注册名为 `ser2mcp` 的 MCP 服务器，工具以 `mcp__ser2mcp__uart_*` 暴露
+3. **注意**：`kind=mcp` 安装时 `.mcp.json` 中的 `command` 是原样写入配置的，**不会自动拼接仓库路径**——请把 `.mcp.json`（或已注册的服务器配置）里的 `command` 改为本机绝对路径，例如 Windows `C:\\tools\\ser2mcp.cmd`、Linux/macOS `/opt/ser2mcp/bin/ser2mcp.cmd`；仓库内的 `bin/ser2mcp.cmd` 为跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`）
 
 环境变量（可选）：
 
