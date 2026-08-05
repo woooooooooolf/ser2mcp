@@ -117,6 +117,10 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 ### 以 Reasonix MCP 组件安装（kind=mcp）
 
+在 Reasonix 中对该仓库执行：
+
+> Install this Reasonix mcp package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="mcp".
+
 仓库根目录的 `.mcp.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
 
 1. 在 Reasonix 中执行安装（`install_source`，kind=mcp），源指向本仓库
