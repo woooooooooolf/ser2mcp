@@ -123,9 +123,14 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 仓库根目录的 `.mcp.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
 
-1. 在 Reasonix 中执行安装（`install_source`，kind=mcp），源指向本仓库
-2. 安装后自动注册名为 `ser2mcp` 的 MCP 服务器，工具以 `mcp__ser2mcp__uart_*` 暴露
-3. **注意**：`kind=mcp` 安装时 `.mcp.json` 中的 `command` 是原样写入配置的，**不会自动拼接仓库路径**——请把 `.mcp.json`（或已注册的服务器配置）里的 `command` 改为本机绝对路径，例如 Windows `C:\\tools\\ser2mcp.cmd`、Linux/macOS `/opt/ser2mcp/bin/ser2mcp.cmd`；仓库内的 `bin/ser2mcp.cmd` 为跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`）
+1. **先把仓库放到本机固定位置**（例如 `git clone` 到 `C:\tools\ser2mcp`，或从 Releases 下载二进制放入该目录）——`.mcp.json` 只声明了相对路径 `bin/ser2mcp.cmd`，安装后需要手动改成指向本机的绝对路径
+2. 在 Reasonix 中执行安装（`install_source`，kind=mcp）：**源请填写仓库内 `.mcp.json` 的 URL**，即 `https://raw.githubusercontent.com/woooooooooolf/ser2mcp/main/.mcp.json`。注意不要填仓库主页 URL（`https://github.com/woooooooooolf/ser2mcp`）——它会被误判为 HTTP 端点而不是 stdio 服务器
+3. 安装后自动注册名为 `ser2mcp` 的 MCP 服务器，工具以 `mcp__ser2mcp__uart_*` 暴露
+4. **注意**：`kind=mcp` 安装时 `.mcp.json` 中的 `command` 是原样写入配置的，**不会自动拼接仓库路径**——请把已注册的服务器配置里的 `command` 改为本机绝对路径：
+   - Windows：`C:\tools\ser2mcp\bin\ser2mcp.exe`（或 `ser2mcp.cmd`，二者等价）
+   - Linux：`/opt/ser2mcp/bin/ser2mcp`　macOS：`/opt/ser2mcp/bin/ser2mcp-macos`
+   - 仓库内的 `bin/ser2mcp.cmd` 为跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`；注意保持纯 ASCII，cmd.exe 在非 UTF-8 代码页下解析非 ASCII 字节会出错）
+5. **验证**：注册后调用 `uart_list_ports`，应返回本机串口列表（可能为空数组）
 
 环境变量（可选）：
 
