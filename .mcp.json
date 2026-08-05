@@ -1,7 +1,3 @@
 {
-  "mcpServers": {
-    "ser2mcp": {
-      "command": "bin/ser2mcp.cmd"
-    }
-  }
+  "mcpServers": {}
 }
