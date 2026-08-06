@@ -54,7 +54,7 @@ fn structured_error_of(r: &CallToolResult) -> Option<String> {
 async fn e2e_tool_registration_and_errors() {
     let client = connect().await.expect("连接 ser2mcp 失败");
 
-    // 1. 工具注册：应包含全部 9 个工具
+    // 1. 工具注册：应包含全部 11 个工具
     let tools = client
         .list_tools(Default::default())
         .await
@@ -69,6 +69,8 @@ async fn e2e_tool_registration_and_errors() {
             "uart_close".to_string(),
             "uart_configure".to_string(),
             "uart_exchange".to_string(),
+            "uart_expect".to_string(),
+            "uart_expect_send".to_string(),
             "uart_list_ports".to_string(),
             "uart_open".to_string(),
             "uart_read".to_string(),
@@ -186,6 +188,67 @@ async fn e2e_tool_registration_and_errors() {
     .await
     .expect("close 调用失败");
     assert!(r.is_error.unwrap_or(false));
+
+    // 11. uart_expect 未打开 → 工具级错误
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "timeout_ms": 100}),
+    )
+    .await
+    .expect("expect 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+    assert!(
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开")
+    );
+
+    // 12. uart_expect_send 未打开 → 工具级错误
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "reply": "0D 0A", "timeout_ms": 100}),
+    )
+    .await
+    .expect("expect_send 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+
+    // 13. 参数校验：空 pattern → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": ""}),
+    )
+    .await;
+    assert!(r.is_err(), "空 pattern 应触发 invalid_params: {r:?}");
+
+    // 14. 参数校验：非法 hex pattern → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "zz"}),
+    )
+    .await;
+    assert!(r.is_err(), "非法 hex pattern 应触发 invalid_params");
+
+    // 15. 参数校验：uart_expect_send 空 reply → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "reply": ""}),
+    )
+    .await;
+    assert!(r.is_err(), "空 reply 应触发 invalid_params: {r:?}");
+
+    // 16. 参数校验：非法 pattern_mode → 协议级错误
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "pattern_mode": "base64"}),
+    )
+    .await;
+    assert!(r.is_err(), "非法 pattern_mode 应触发 invalid_params");
 
     client.cancel().await.expect("关闭客户端失败");
 }

@@ -43,7 +43,7 @@ flowchart LR
 
 ## 特性
 
-- **9 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、状态、清缓冲、关闭
+- **11 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、等待匹配输出、匹配后立即发送、状态、清缓冲、关闭
 - **完善的串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
 - **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
 - **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
@@ -148,11 +148,13 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
 | `uart_read` | 拉取上行缓冲（`port` 必填） |
 | `uart_exchange` | 发送 + 读取一步完成（`port` 必填，最常用） |
+| `uart_expect` | 等待匹配输出：阻塞直到串口输出中出现指定 pattern 或超时（`port`、`pattern` 必填；可选 `data` 实现"发送+等待"） |
+| `uart_expect_send` | 匹配后立即发送：等待 pattern 出现后在同一临界区内发送 reply（`port`、`pattern`、`reply` 必填） |
 | `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误（`port` 必填） |
 | `uart_clear` | 清空未读缓冲（`port` 必填） |
 | `uart_close` | 关闭串口并释放句柄（`port` 必填） |
 
-> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析、匹配或过滤，非预期数据也会原样返回，由 AI 与上层自行判断。
+> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
 
 ### 读取语义（核心设计）
 
@@ -178,14 +180,31 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 > `overflow_delta > 0` 表示自上次读取以来有数据因缓冲写满被覆盖丢弃——数据有缺口，应调大 `buffer_size` 或降低拉取间隔。
 
+### 内容匹配语义（uart_expect / uart_expect_send）
+
+与 `uart_read` / `uart_exchange` 的**时间语义**（空闲判定）不同，expect 系列基于**内容匹配**：等待串口输出中出现指定字符串，命中（或超时）即返回，把"设备何时就绪"的判断交给服务器（命中即返回，毫秒级），替代 AI 侧 `sleep`+盲发 的时序编排：
+
+- `uart_expect {port, pattern: "Zynq>", pattern_mode: "text"}`：等待提示符出现；可选 `data` 先发送再等待，一步完成"发送+等待"
+- `uart_expect_send {port, pattern: "Hit any key", reply: "\n", pattern_mode: "text"}`：命中瞬间发送按键，抢 bootdelay 窗口
+
+行为要点：
+
+- **精确子串匹配**（大小写敏感），不支持正则；pattern 可跨多次到达分片、跨环形缓冲 wrap，均能命中
+- **历史数据立即参与匹配**：调用时缓冲中已有的数据（如 `uart_open` 后已囤积的 bootlog）直接参与查找，可能无需等待即命中
+- **consume 语义**：`consume=true`（默认）命中后取走并返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲（后续 `uart_read` 可取）；`consume=false` 纯等待、不消费数据
+- **超时语义**：`timeout_ms`（默认 5000）内未命中返回 `matched=false`、`reason="timeout"`，数据不消费（留在缓冲供诊断）
+- **溢出注意**：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；返回值 `overflow_delta > 0` 可帮助识别该情况
+
 ## 典型用法（AI 助手视角）
 
 ```
 1. uart_list_ports                      → 找到 "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → 发 "AT\r\n"，等回复
-4. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
-5. uart_close {port: "COM3"}
+4. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → 等提示符（时序编排）
+5. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → 命中即按键（抢 bootdelay 窗口）
+6. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
+7. uart_close {port: "COM3"}
 ```
 
 > **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟。单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms）；如需更低延迟，可按设备响应节奏调小 `uart_exchange` / `uart_read` 的 `idle_ms`（例如 50ms；注意保持大于设备响应间隙，否则可能截断响应）。
@@ -209,7 +228,7 @@ src/
 ├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒）
 ├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取）
 ├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）
-└── server.rs    # MCP 工具层（9 个工具 + ServerHandler）
+└── server.rs    # MCP 工具层（11 个工具 + ServerHandler）
 tests/
 └── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手）
 examples/

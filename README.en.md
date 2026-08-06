@@ -43,7 +43,7 @@ flowchart LR
 
 ## Features
 
-- **9 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, status, clear buffer, close
+- **11 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, expect output, send-on-match, status, clear buffer, close
 - **Full serial parameter control**: baudrate / data bits (5-8) / parity (none/even/odd) / stop bits (1,2) / flow control (none/software/hardware) / read timeout — all settable via `uart_open` / `uart_configure`
 - **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
@@ -148,11 +148,13 @@ Environment variables (optional):
 | `uart_write` | Send data, return immediately (`port` required; no reply waiting) |
 | `uart_read` | Pull buffered ingress data (`port` required) |
 | `uart_exchange` | Send + read in one step (`port` required; most common) |
+| `uart_expect` | Wait for a matching output: block until a specified pattern appears on the port or until timeout (`port`, `pattern` required; optional `data` for one-step "send + wait") |
+| `uart_expect_send` | Send on match: wait for a pattern, then send `reply` in the same critical section (`port`, `pattern`, `reply` required) |
 | `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors (`port` required) |
 | `uart_clear` | Clear unread buffered data (`port` required) |
 | `uart_close` | Close the port and release the handle (`port` required) |
 
-> **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse, match or filter content, so unexpected data is returned unchanged for the AI / upper layer to interpret.
+> **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
 ### Read Semantics (Core Design)
 
@@ -178,14 +180,31 @@ Example return value:
 
 > `overflow_delta > 0` means bytes were overwritten since the last read because the buffer was full — data has gaps; increase `buffer_size` or read more frequently.
 
+### Content-Match Semantics (uart_expect / uart_expect_send)
+
+Unlike the **time-based semantics** (idle detection) of `uart_read` / `uart_exchange`, the expect tools are **content-based**: they wait until a given string appears in the ingress, then return (or time out). This moves the "is the device ready?" decision into the server (match returns in milliseconds) and replaces AI-side `sleep` + blind-send timing loops:
+
+- `uart_expect {port, pattern: "Zynq>", pattern_mode: "text"}`: wait for a prompt; optional `data` sends first, one-step "send + wait"
+- `uart_expect_send {port, pattern: "Hit any key", reply: "\n", pattern_mode: "text"}`: press a key the moment the pattern appears — wins the bootdelay window
+
+Behavior notes:
+
+- **Exact substring match** (case-sensitive), no regex; patterns split across multiple read chunks or across ring-buffer wrap are still matched
+- **Historical data matches immediately**: data already buffered at call time (e.g. bootlog accumulated after `uart_open`) participates in the search — may hit without waiting
+- **consume semantics**: `consume=true` (default) takes and returns everything up to and including the pattern; bytes after the pattern stay buffered (readable later via `uart_read`). `consume=false` waits without consuming
+- **timeout semantics**: if not matched within `timeout_ms` (default 5000), returns `matched=false`, `reason="timeout"`; data is not consumed (left buffered for diagnosis)
+- **overflow caveat**: if the buffer overflows and overwrites the pattern and the device never resends it, expect waits until timeout; `overflow_delta > 0` in the result helps identify this
+
 ## Typical Usage (AI Agent Perspective)
 
 ```
 1. uart_list_ports                      → find "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → send "AT\r\n", wait for reply
-4. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
-5. uart_close {port: "COM3"}
+4. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
+5. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
+6. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
+7. uart_close {port: "COM3"}
 ```
 
 > **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms); lower it (e.g. 50ms) for `uart_exchange` / `uart_read` if you need lower latency — but keep it larger than the device's response gap, or the response may be truncated.
@@ -206,10 +225,10 @@ src/
 ├── main.rs      # entry point: stdio transport
 ├── lib.rs       # crate docs & module declarations
 ├── hex.rs       # hex encode/decode (hex/text dual mode)
-├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify)
+├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify + pattern search)
 ├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull)
 ├── reader.rs    # event-driven / non-blocking reader thread (platform adaptation layer)
-└── server.rs    # MCP tool layer (9 tools + ServerHandler)
+└── server.rs    # MCP tool layer (11 tools + ServerHandler)
 tests/
 └── e2e.rs       # end-to-end MCP protocol tests (real subprocess handshake)
 examples/

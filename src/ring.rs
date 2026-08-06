@@ -49,6 +49,47 @@ impl RingBuf {
         (inner.len, inner.overflow_total)
     }
 
+    /// 在未读区中查找 pattern 首次出现的位置（相对未读区起点的偏移），未命中返回 `None`。
+    ///
+    /// 用于 `uart_expect` 的内容匹配：跨多次 `push` 分片到达的 pattern
+    /// （读线程单次 `read()` 可能只搬入几个字节）也能命中；环形 wrap 由内部展开处理。
+    /// 空 pattern 定义为命中在偏移 0（调用方应先行拦截空模式）。
+    ///
+    /// 生产路径使用原子的 [`Self::find_and_take`]（查找与消费在同一临界区内）；
+    /// 本方法为独立的只读查找 API，供测试与组合使用。
+    #[allow(dead_code)]
+    pub fn find(&self, pattern: &[u8]) -> Option<usize> {
+        let inner = self.inner.lock().unwrap();
+        find_in(&inner, pattern)
+    }
+
+    /// 在未读区中查找 pattern；命中且 `consume=true` 时在同一临界区内原子取走
+    /// "截至 pattern 结尾"的内容（读线程无法在查找与取走之间插入覆盖）。
+    ///
+    /// 返回 `(命中偏移, 取走的数据, 累计溢出计数)`；未命中时取走的数据为空。
+    pub fn find_and_take(&self, pattern: &[u8], consume: bool) -> (Option<usize>, Vec<u8>, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let pos = find_in(&inner, pattern);
+        let out = match pos {
+            Some(p) if consume => take_prefix_inner(&mut inner, p + pattern.len()),
+            _ => Vec::new(),
+        };
+        (pos, out, inner.overflow_total)
+    }
+
+    /// 取走未读区前 n 字节（超出当前未读长度时取走全部），返回数据与**累计**溢出字节数。
+    ///
+    /// 供 `uart_expect` 的 `consume=true` 语义使用：命中后取走"截至 pattern 结尾"的内容，
+    /// pattern 之后的字节保留在缓冲中，后续 `uart_read` 仍可取走。
+    ///
+    /// 生产路径使用原子的 [`Self::find_and_take`]；本方法为独立的消费 API，供测试与组合使用。
+    #[allow(dead_code)]
+    pub fn take_prefix(&self, n: usize) -> (Vec<u8>, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let out = take_prefix_inner(&mut inner, n);
+        (out, inner.overflow_total)
+    }
+
     /// 清空未读数据（溢出计数保留）。
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -158,6 +199,57 @@ impl RingBuffer {
     }
 }
 
+/// 在环形缓冲未读区中查找 pattern 首次出现的位置（相对未读区起点的偏移）。
+/// 空 pattern 返回 `Some(0)`；未命中返回 `None`。调用方需已持有锁。
+fn find_in(inner: &RingBuffer, pattern: &[u8]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    if pattern.len() > inner.len {
+        return None;
+    }
+    let tail = inner.tail();
+    let first = (inner.capacity - tail).min(inner.len);
+    let (seg1, seg2) = (
+        &inner.data[tail..tail + first],
+        &inner.data[..inner.len - first],
+    );
+    let m = pattern.len();
+    for start in 0..=inner.len - m {
+        let mut ok = true;
+        for (k, &pb) in pattern.iter().enumerate() {
+            let idx = start + k;
+            let b = if idx < first {
+                seg1[idx]
+            } else {
+                seg2[idx - first]
+            };
+            if b != pb {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// 取走未读区前 n 字节（超出当前未读长度时取走全部），返回数据。调用方需已持有锁。
+fn take_prefix_inner(inner: &mut RingBuffer, n: usize) -> Vec<u8> {
+    let n = n.min(inner.len);
+    let tail = inner.tail();
+    let first = (inner.capacity - tail).min(n);
+    let mut out = Vec::with_capacity(n);
+    out.extend_from_slice(&inner.data[tail..tail + first]);
+    if first < n {
+        out.extend_from_slice(&inner.data[..n - first]);
+    }
+    inner.len -= n;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +317,43 @@ mod tests {
         assert!(data.is_empty());
     }
 
+    #[test]
+    fn find_and_take_atomic_consume() {
+        let rb = RingBuf::new(64);
+        rb.push(b"U-Boot 2024.01\nZynq> ");
+        // consume=true：命中并取走"截至 pattern 结尾"的内容
+        let (pos, data, overflow) = rb.find_and_take(b"Zynq> ", true);
+        assert_eq!(pos, Some(15));
+        assert_eq!(data, b"U-Boot 2024.01\nZynq> ");
+        assert_eq!(overflow, 0);
+        // pattern 之后的剩余数据仍可读
+        rb.push(b"version\n");
+        let (rest, _) = rb.take_all();
+        assert_eq!(rest, b"version\n");
+        // consume=false：命中但不消费
+        rb.push(b"Hit any key to stop");
+        let (pos2, data2, _) = rb.find_and_take(b"any key", false);
+        assert_eq!(pos2, Some(4));
+        assert!(data2.is_empty());
+        let (rest2, _) = rb.take_all();
+        assert_eq!(rest2, b"Hit any key to stop");
+        // 未命中：数据不消费
+        let (pos3, data3, _) = rb.find_and_take(b"Zynq> ", true);
+        assert_eq!(pos3, None);
+        assert!(data3.is_empty());
+        // 跨 wrap 的原子消费
+        let rb2 = RingBuf::new(8);
+        rb2.push(b"ABCD");
+        rb2.push(b"EFGH");
+        rb2.take_prefix(4); // 剩 EFGH？见下：head=0 len=8 → 取走 ABCD，head=0 len=4
+        rb2.push(b"XY"); // 逻辑 EFGHXY（跨 wrap）
+        let (pos4, data4, _) = rb2.find_and_take(b"GHX", true);
+        assert_eq!(pos4, Some(2));
+        assert_eq!(data4, b"EFGHX");
+        let (rest3, _) = rb2.take_all();
+        assert_eq!(rest3, b"Y");
+    }
+
     #[tokio::test]
     async fn notify_wakes_reader() {
         let rb = RingBuf::new(8);
@@ -239,5 +368,104 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         rb.push(b"x");
         t.await.unwrap();
+    }
+
+    #[test]
+    fn find_basic() {
+        let rb = RingBuf::new(16);
+        // 空缓冲
+        assert_eq!(rb.find(b"AB"), None);
+        rb.push(b"hello world");
+        assert_eq!(rb.find(b"hello"), Some(0));
+        assert_eq!(rb.find(b"world"), Some(6));
+        assert_eq!(rb.find(b"lo wo"), Some(3));
+        // 未命中
+        assert_eq!(rb.find(b"zzz"), None);
+        // pattern 比未读区长
+        assert_eq!(rb.find(b"hello world!"), None);
+        // 空 pattern：定义为命中偏移 0
+        assert_eq!(rb.find(b""), Some(0));
+    }
+
+    #[test]
+    fn find_crosses_push_boundary() {
+        // pattern 分两次 push 到达（模拟读线程分批搬入）
+        let rb = RingBuf::new(64);
+        rb.push(b"Hit any key");
+        rb.push(b" to stop autoboot");
+        assert_eq!(rb.find(b"key to"), Some(8));
+        // pattern 完全由第二次 push 提供
+        assert_eq!(rb.find(b"autoboot"), Some(20));
+        // 跨两次 push 且 pattern 较长
+        rb.push(b"\r\nZynq> ");
+        assert_eq!(rb.find(b"autoboot\r\nZynq"), Some(20));
+    }
+
+    #[test]
+    fn find_across_wrap() {
+        let rb = RingBuf::new(8);
+        rb.push(b"ABCD"); // head=4 len=4
+        rb.push(b"EFGH"); // head=0 len=8（满）
+        rb.take_prefix(4); // 取走 ABCD → head=0 len=4
+        rb.push(b"XY"); // head=2 len=6：物理 data[0..2]=XY + data[4..8]=EFGH
+        // 逻辑序跨 wrap：EFGH(4..8) + XY(0..2) = "EFGHXY"
+        assert_eq!(rb.find(b"EFGH"), Some(0));
+        assert_eq!(rb.find(b"XY"), Some(4));
+        assert_eq!(rb.find(b"GHX"), Some(2)); // pattern 跨 wrap 边界
+        assert_eq!(rb.find(b"AB"), None);
+        // 跨 wrap 且跨 push 边界
+        rb.push(b"Z"); // head=3 len=7：逻辑 EFGHXYZ
+        assert_eq!(rb.find(b"XYZ"), Some(4));
+        assert_eq!(rb.find(b"HXY"), Some(3));
+    }
+
+    #[test]
+    fn find_after_overflow_eviction() {
+        let rb = RingBuf::new(4);
+        rb.push(b"1234");
+        rb.push(b"5678"); // 全部覆盖
+        assert_eq!(rb.find(b"12"), None);
+        assert_eq!(rb.find(b"5678"), Some(0));
+    }
+
+    #[test]
+    fn take_prefix_basic() {
+        let rb = RingBuf::new(16);
+        rb.push(b"hello world");
+        // 取走 0 字节
+        let (empty, overflow) = rb.take_prefix(0);
+        assert!(empty.is_empty());
+        assert_eq!(overflow, 0);
+        // 取走部分（截至 pattern 结尾）
+        let (data, overflow) = rb.take_prefix(5);
+        assert_eq!(data, b"hello");
+        assert_eq!(overflow, 0);
+        // 剩余数据仍在缓冲，且偏移相对新起点（剩余为 " world"）
+        assert_eq!(rb.find(b"world"), Some(1));
+        let (rest, _) = rb.take_all();
+        assert_eq!(rest, b" world");
+        // 取走超过未读长度 → 取走全部
+        let rb2 = RingBuf::new(8);
+        rb2.push(b"AB");
+        let (all, _) = rb2.take_prefix(100);
+        assert_eq!(all, b"AB");
+    }
+
+    #[test]
+    fn take_prefix_across_wrap() {
+        let rb = RingBuf::new(8);
+        rb.push(b"ABCD"); // head=4 len=4
+        rb.push(b"EFGH"); // head=0 len=8（满）
+        rb.take_prefix(4); // 取走 ABCD → head=0 len=4
+        rb.push(b"XY"); // head=2 len=6：物理 data[0..2]=XY + data[4..8]=EFGH
+        // 逻辑序 wrap：EFGH(4..8) + XY(0..2)
+        let (data, _) = rb.take_prefix(5); // 取走 EFGHX，跨 wrap
+        assert_eq!(data, b"EFGHX");
+        let (rest, _) = rb.take_all();
+        assert_eq!(rest, b"Y");
+        // 取走全部（n >= len）也应正确（上一段已消费 "Y"）
+        rb.push(b"AB"); // head=2→write 2 字节，head=4 len=2
+        let (all, _) = rb.take_prefix(100);
+        assert_eq!(all, b"AB");
     }
 }

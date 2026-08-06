@@ -4,7 +4,15 @@
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-08-05
+### Added
+
+- `uart_expect`：等待匹配输出原语（`port`、`pattern` 必填；可选 `data` 实现"发送+等待"一步完成）。阻塞直到串口输出中出现指定字符串（如 `Zynq>`、`Hit any key` 等提示符/关键字）或超时，把时序编排从 AI 侧 `sleep`+盲发 转移到服务器（命中即返回，毫秒级）。`consume=true`（默认）时取走并返回"截至 pattern 结尾"的内容，pattern 之后的数据保留在缓冲；`consume=false` 时纯等待、数据不消费。精确子串匹配（大小写敏感），跨分片/环形 wrap 均可命中，缓冲中已有数据立即参与匹配
+- `uart_expect_send`：匹配后立即发送（`port`、`pattern`、`reply` 必填）。等待→命中→发送在同一临界区内一步原子完成，消除"expect 返回 → 再调 write"的往返延迟，适合 bootdelay 抢窗口等时序敏感场景；超时未命中时不发送 reply
+- `ring` 新增 `find` / `find_and_take`（锁内原子查找+消费，读线程无法插入覆盖）/ `take_prefix`，配套单元测试覆盖跨分片、跨 wrap、溢出覆盖等场景
+
+### Changed
+
+- 工具面 9 → 11；`uart_exchange` / `uart_write` 等既有工具行为不变（内部写入路径抽取为 `write_locked` 复用）
 
 ### Fixed
 

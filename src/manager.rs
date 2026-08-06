@@ -159,6 +159,36 @@ pub enum ReadReason {
     Timeout,
 }
 
+/// 期待匹配结果（`uart_expect` / `uart_expect_send` 返回值）。
+#[derive(Debug)]
+pub struct ExpectOutcome {
+    /// 是否在超时前匹配到 pattern。
+    pub matched: bool,
+    /// `consume=true` 且命中时取走的"截至 pattern 结尾"的内容；否则为空。
+    pub data: Vec<u8>,
+    /// 本次调用实际写入的字节数（`uart_expect` 传 `data` 时 / `uart_expect_send` 的
+    /// `reply`；超时未命中时不发送 reply，该字段为发送侧的字节数）。
+    pub written: usize,
+    /// 返回原因（matched / timeout）。
+    pub reason: ExpectReason,
+    /// 自上次消费以来因缓冲溢出被覆盖丢弃的字节数。`consume=false` 时不消费数据，
+    /// 不改变消费状态，该字段恒为 0（后续 `uart_read` 的增量语义不受影响）。
+    pub overflow_delta: u64,
+    /// 自打开以来累计的溢出字节数。
+    pub overflow_total: u64,
+    /// 调用结束后缓冲中剩余的未读字节数。
+    pub buffered: usize,
+}
+
+/// 期待匹配返回原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectReason {
+    /// 在超时前匹配到 pattern。
+    Matched,
+    /// 达到 timeout_ms 总超时仍未匹配（数据不消费，留在缓冲供诊断）。
+    Timeout,
+}
+
 /// 运行时状态快照（`uart_available` 返回值）。
 #[derive(Debug, serde::Serialize)]
 pub struct AvailableInfo {
@@ -387,16 +417,111 @@ impl SerialManager {
         let ap = ports
             .get(port_name)
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-        let mut port = ap.port.lock().unwrap();
+        write_locked(&ap.port, data)
+    }
+
+    /// 等待串口输出中出现 pattern（内容匹配，跨分片/wrap）；`data` 传入时先发送再等待。
+    /// 命中或超时后返回。详见 `ExpectOutcome`。
+    pub async fn expect(
+        &self,
+        port_name: &str,
+        data: Option<&[u8]>,
+        pattern: &[u8],
+        timeout_ms: u64,
+        consume: bool,
+    ) -> Result<ExpectOutcome, String> {
+        self.expect_inner(port_name, pattern, timeout_ms, consume, data, None)
+            .await
+    }
+
+    /// 等待串口输出中出现 pattern，命中后在同一临界区内**立即**发送 `reply`
+    /// （消除"expect 返回 → 再调 write"之间的往返延迟）。超时未命中时不发送。
+    pub async fn expect_send(
+        &self,
+        port_name: &str,
+        pattern: &[u8],
+        reply: &[u8],
+        timeout_ms: u64,
+        consume: bool,
+    ) -> Result<ExpectOutcome, String> {
+        self.expect_inner(port_name, pattern, timeout_ms, consume, None, Some(reply))
+            .await
+    }
+
+    /// 内部实现：可选先发送 `send` → 等待 pattern → 命中后可选发送 `reply`。
+    /// 整个流程在同一 `io_lock` 临界区内（原子，无并发工具调用插入）。
+    #[allow(clippy::too_many_arguments)]
+    async fn expect_inner(
+        &self,
+        port_name: &str,
+        pattern: &[u8],
+        timeout_ms: u64,
+        consume: bool,
+        send: Option<&[u8]>,
+        reply: Option<&[u8]>,
+    ) -> Result<ExpectOutcome, String> {
+        let _guard = self.io_lock.lock().await;
+        let (buffer, last_overflow, port) = {
+            let ports = self.ports.lock().unwrap();
+            let ap = ports
+                .get(port_name)
+                .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
+        };
+
         let mut written = 0;
-        while written < data.len() {
-            let n = port
-                .write(&data[written..])
-                .map_err(|e| format!("写入失败: {e}"))?;
-            written += n;
+        if let Some(send) = send {
+            written = write_locked(&port, send)?;
         }
-        port.flush().map_err(|e| format!("flush 失败: {e}"))?;
-        Ok(written)
+
+        let timeout = Duration::from_millis(timeout_ms);
+        let start = Instant::now();
+        let (matched, data, overflow_total) = loop {
+            // find_and_take 在同一临界区内完成查找与消费（读线程无法插入覆盖）。
+            let (pos, taken, ovf) = buffer.find_and_take(pattern, consume);
+            if pos.is_some() {
+                break (true, taken, ovf);
+            }
+            if start.elapsed() >= timeout {
+                break (false, Vec::new(), ovf);
+            }
+            tokio::select! {
+                _ = buffer.notified() => {}
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            }
+        };
+
+        if matched {
+            if let Some(reply) = reply {
+                written = write_locked(&port, reply)?;
+            }
+        }
+
+        // 消费状态：仅"命中且 consume=true"视为消费（更新溢出基线）；
+        // 否则不改变消费状态，后续 uart_read 的 overflow_delta 语义不受影响。
+        let (overflow_delta, overflow_total) = if matched && consume {
+            let mut last = last_overflow.lock().unwrap();
+            let delta = overflow_total.saturating_sub(*last);
+            *last = overflow_total;
+            (delta, overflow_total)
+        } else {
+            (0, overflow_total)
+        };
+        let (buffered, _) = buffer.stats();
+
+        Ok(ExpectOutcome {
+            matched,
+            data,
+            written,
+            reason: if matched {
+                ExpectReason::Matched
+            } else {
+                ExpectReason::Timeout
+            },
+            overflow_delta,
+            overflow_total,
+            buffered,
+        })
     }
 
     /// 拉取缓冲：等待"空闲判定 / 达到 max_bytes / 超时"三者之一后返回全部未读数据。
@@ -544,6 +669,21 @@ fn data_bits_to_u8(v: DataBits) -> u8 {
         DataBits::Seven => 7,
         DataBits::Eight => 8,
     }
+}
+
+/// 写入数据（只发不等），返回实际写入字节数。调用方需已持有 `io_lock`（或处于
+/// `expect_inner` 的临界区内）且端口已打开。
+fn write_locked(port: &Arc<Mutex<Box<dyn SerialPort>>>, data: &[u8]) -> Result<usize, String> {
+    let mut p = port.lock().unwrap();
+    let mut written = 0;
+    while written < data.len() {
+        let n = p
+            .write(&data[written..])
+            .map_err(|e| format!("写入失败: {e}"))?;
+        written += n;
+    }
+    p.flush().map_err(|e| format!("flush 失败: {e}"))?;
+    Ok(written)
 }
 
 fn stop_bits_to_u8(v: StopBits) -> u8 {

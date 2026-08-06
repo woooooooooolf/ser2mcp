@@ -1,18 +1,22 @@
 //! MCP 工具层：工具注册 + ServerHandler 实现。
 //!
-//! 工具面（9 个）：
+//! 工具面（11 个）：
 //! - `uart_list_ports`   枚举本机可用串口
 //! - `uart_open`         打开串口（全量串口参数 + 内部参数：缓冲区大小等）
 //! - `uart_configure`    运行时重配置（仅更新传入项）
 //! - `uart_write`        只发不等
 //! - `uart_read`         拉取缓冲（空闲判定/上限/超时三种返回条件）
 //! - `uart_exchange`     写 + 读（对 LLM 最常用的一步操作）
+//! - `uart_expect`       等待匹配输出（可选"发送+等待"；内容匹配语义）
+//! - `uart_expect_send`  匹配后立即发送（等待→命中→发送一步原子完成）
 //! - `uart_available`    状态快照（含缓冲统计与读线程错误）
 //! - `uart_clear`        清空未读缓冲
 //! - `uart_close`        关闭串口
 //!
 //! 多端口与透传：支持同时打开多个串口，端口名（如 `COM3` / `/dev/ttyUSB0`）即句柄，
-//! 除 `uart_list_ports` 外每个工具都要求 `port` 参数；字节流原样透传，不做解析/匹配/过滤。
+//! 除 `uart_list_ports` 外每个工具都要求 `port` 参数；字节流原样透传，不做解析/过滤；
+//! `uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找（不修改数据），
+//! 命中与否不影响字节流的透传语义。
 //!
 //! 数据表示：串口数据是二进制，而 MCP 参数/返回值是文本，因此统一用
 //! hex 字符串（如 `"41 54 0D 0A"`）传递，`mode` 参数可切换为文本。
@@ -54,6 +58,18 @@ const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传
   ③ 总等待超过 timeout_ms（默认 5000ms）。
 - 返回值中的 overflow_delta / overflow_total 表示缓冲溢出被覆盖丢弃的字节数，
   大于 0 时说明数据有缺口，应调大 buffer_size 或减小拉取间隔。
+
+内容匹配语义（uart_expect / uart_expect_send，时序编排利器）：
+- uart_expect 等待串口输出中出现指定 pattern（如 "Zynq>"、"Hit any key" 等提示符/关键字，
+  pattern_mode="text"），命中或超时后返回；可选 data 实现"发送+等待"一步完成。
+  consume=true（默认）时返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲；
+  consume=false 时纯等待、数据不消费。调用时缓冲中已有的数据立即参与匹配（可命中历史输出）。
+- uart_expect_send 等待 pattern 出现后在同一临界区内立即发送 reply（如
+  {"pattern": "Hit any key", "reply": "\\n"} 抢 bootdelay 窗口），超时未命中时不发送。
+- 两者均为精确子串匹配（大小写敏感），不支持正则；替代"sleep + 盲发"的时序编排方式，
+  把"何时就绪"的判断交给服务器，命中即返回（毫秒级），比 AI 侧轮询快 1-2 个数量级。
+- 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
+  返回值中的 overflow_delta > 0 可帮助识别该情况。
 
 回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"#;
 
@@ -167,6 +183,49 @@ pub struct CloseArgs {
     pub port: String,
 }
 
+/// 串口工具参数：uart_expect（等待匹配输出，可选"发送+等待"）。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExpectArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+    /// 要等待出现的字符串（hex 或 text，取决于 pattern_mode）。
+    pub pattern: String,
+    /// pattern 编码：hex（默认）或 text。
+    pub pattern_mode: Option<String>,
+    /// 总等待超时（毫秒），默认 5000。
+    pub timeout_ms: Option<u64>,
+    /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true；
+    /// false 时纯等待（数据留在缓冲，后续可用 uart_read 取走）。
+    pub consume: Option<bool>,
+    /// 可选：等待前先发送的数据（"发送+等待"一步完成），编码取决于 mode。
+    pub data: Option<String>,
+    /// data 的编码：hex（默认）或 text。
+    pub mode: Option<String>,
+    /// 返回 data 字段的编码：hex（默认）或 text（非文本数据自动降级为 hex）。
+    pub read_mode: Option<String>,
+}
+
+/// 串口工具参数：uart_expect_send（匹配后立即发送）。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExpectSendArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+    /// 要等待出现的字符串（hex 或 text，取决于 pattern_mode）。
+    pub pattern: String,
+    /// 命中后立即发送的内容（hex 或 text，取决于 reply_mode）；超时未命中时不发送。
+    pub reply: String,
+    /// pattern 编码：hex（默认）或 text。
+    pub pattern_mode: Option<String>,
+    /// reply 编码：hex（默认）或 text。
+    pub reply_mode: Option<String>,
+    /// 总等待超时（毫秒），默认 5000。
+    pub timeout_ms: Option<u64>,
+    /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true。
+    pub consume: Option<bool>,
+    /// 返回 data 字段的编码：hex（默认）或 text（非文本数据自动降级为 hex）。
+    pub read_mode: Option<String>,
+}
+
 fn require_port(port: &str) -> Result<(), McpError> {
     if port.trim().is_empty() {
         Err(McpError::invalid_params("port 不能为空", None))
@@ -214,6 +273,30 @@ fn read_reason_str(r: ReadReason) -> &'static str {
         ReadReason::MaxBytes => "max_bytes",
         ReadReason::Timeout => "timeout",
     }
+}
+
+/// 构造 expect 系列工具（uart_expect / uart_expect_send）的统一返回值。
+fn expect_result(
+    outcome: manager::ExpectOutcome,
+    pattern: &str,
+    read_mode: &str,
+) -> CallToolResult {
+    let (data, used_mode) = encode_recv(&outcome.data, read_mode);
+    CallToolResult::structured(json!({
+        "matched": outcome.matched,
+        "pattern": pattern,
+        "data": data,
+        "bytes": outcome.data.len(),
+        "mode": used_mode,
+        "written": outcome.written,
+        "reason": match outcome.reason {
+            manager::ExpectReason::Matched => "matched",
+            manager::ExpectReason::Timeout => "timeout",
+        },
+        "overflow_delta": outcome.overflow_delta,
+        "overflow_total": outcome.overflow_total,
+        "buffered_bytes": outcome.buffered,
+    }))
 }
 
 /// MCP 服务器主体。
@@ -475,6 +558,107 @@ impl Ser2Mcp {
                 }
                 Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
             },
+            Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
+        }
+    }
+
+    /// 等待串口输出中出现指定 pattern（内容匹配，替代 AI 侧 sleep+盲发 的时序编排）。
+    /// 可选 `data` 实现"发送+等待"一步完成；命中（或超时）后返回。
+    /// `consume=true`（默认）时取走并返回"截至 pattern 结尾"的内容，pattern 之后
+    /// 的字节留在缓冲；`consume=false` 时纯等待、数据不消费（可用 uart_read 取走诊断）。
+    #[tool(
+        description = "等待串口输出中出现指定 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。命中或超时后返回，consume=true（默认）时返回截至 pattern 结尾的内容。"
+    )]
+    async fn uart_expect(
+        &self,
+        Parameters(args): Parameters<ExpectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        let pattern_mode = args.pattern_mode.unwrap_or_else(|| "hex".into());
+        if let Err(e) = parse_mode(&pattern_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let pattern = match encode_send(&args.pattern, &pattern_mode) {
+            Ok(p) => p,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        if pattern.is_empty() {
+            return Err(McpError::invalid_params("pattern 不能为空", None));
+        }
+        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let consume = args.consume.unwrap_or(true);
+        let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
+        if let Err(e) = parse_mode(&read_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let send = match args.data {
+            Some(d) => {
+                let mode = args.mode.unwrap_or_else(|| "hex".into());
+                if let Err(e) = parse_mode(&mode) {
+                    return Err(McpError::invalid_params(e, None));
+                }
+                match encode_send(&d, &mode) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => return Err(McpError::invalid_params(e, None)),
+                }
+            }
+            None => None,
+        };
+        match self
+            .manager
+            .expect(&args.port, send.as_deref(), &pattern, timeout_ms, consume)
+            .await
+        {
+            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode)),
+            Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
+        }
+    }
+
+    /// 等待串口输出中出现指定 pattern，命中后在同一临界区内**立即**发送 `reply`
+    /// （等待→命中→发送一步原子完成，消除"expect 返回 → 再调 write"的往返延迟，
+    /// 适合 bootdelay 抢窗口等时序敏感场景）。超时未命中时不发送 reply。
+    #[tool(
+        description = "等待串口输出中出现指定 pattern 后立即发送 reply（port、pattern、reply 必填；超时未命中不发送）。返回 matched、written、data 及溢出统计。"
+    )]
+    async fn uart_expect_send(
+        &self,
+        Parameters(args): Parameters<ExpectSendArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        let pattern_mode = args.pattern_mode.unwrap_or_else(|| "hex".into());
+        if let Err(e) = parse_mode(&pattern_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let pattern = match encode_send(&args.pattern, &pattern_mode) {
+            Ok(p) => p,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        if pattern.is_empty() {
+            return Err(McpError::invalid_params("pattern 不能为空", None));
+        }
+        let reply_mode = args.reply_mode.unwrap_or_else(|| "hex".into());
+        if let Err(e) = parse_mode(&reply_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let reply = match encode_send(&args.reply, &reply_mode) {
+            Ok(r) => r,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        if reply.is_empty() {
+            return Err(McpError::invalid_params("reply 不能为空", None));
+        }
+        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        let consume = args.consume.unwrap_or(true);
+        let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
+        if let Err(e) = parse_mode(&read_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        match self
+            .manager
+            .expect_send(&args.port, &pattern, &reply, timeout_ms, consume)
+            .await
+        {
+            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode)),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
