@@ -21,7 +21,9 @@
 //! - **溢出可检测**：缓冲写满后覆盖最旧数据并累计溢出计数，工具返回值中的
 //!   `overflow_delta / overflow_total` 让数据缺口对 AI 可见；
 //! - **二进制安全**：MCP 通道只保证文本，二进制数据一律以 hex 字符串传递
-//!   （[`hex::encode`] / [`hex::decode`]），`mode="text"` 切换 UTF-8 文本。
+//!   （[`hex::encode`] / [`hex::decode`]），`mode="text"` 切换 UTF-8 文本，
+//!   `read_mode="text-escaped"`（[`hex::encode_escaped`]）文本为主、
+//!   非文本字节 `\xNN` 转义（终端/日志场景不降级）。
 //!
 //! ## 模块
 //!

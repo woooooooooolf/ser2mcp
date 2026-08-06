@@ -261,3 +261,79 @@ async fn e2e_tool_registration_and_errors() {
 
     client.cancel().await.expect("关闭客户端失败");
 }
+
+#[tokio::test]
+async fn e2e_text_escaped_and_newline_params() {
+    let client = connect().await.expect("连接 ser2mcp 失败");
+
+    // 1. 发送侧拒绝 text-escaped（仅返回侧可用）→ 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "x", "mode": "text-escaped"}),
+    )
+    .await;
+    assert!(r.is_err(), "发送侧 text-escaped 应触发 invalid_params: {r:?}");
+
+    // 2. 非法 newline 值 → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "x", "newline": "cr"}),
+    )
+    .await;
+    assert!(r.is_err(), "非法 newline 应触发 invalid_params: {r:?}");
+
+    // 3. read_mode=text-escaped 为合法值：未打开端口应报"未打开"（工具级错误）而非模式错误
+    let r = call(
+        &client,
+        "uart_read",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "mode": "text-escaped", "timeout_ms": 100}),
+    )
+    .await
+    .expect("read 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+    assert!(
+        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        "read_mode=text-escaped 应合法，收到参数错误: {r:?}"
+    );
+
+    // 4. newline=crlf 为合法值：同样应报"未打开"而非参数错误
+    let r = call(
+        &client,
+        "uart_exchange",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "x", "mode": "text", "newline": "crlf", "timeout_ms": 100}),
+    )
+    .await
+    .expect("exchange 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+    assert!(
+        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        "newline=crlf 应合法，收到参数错误: {r:?}"
+    );
+
+    // 5. expect 的 data 支持 newline：合法值应报"未打开"而非参数错误
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "data": "x", "mode": "text", "newline": "lf", "timeout_ms": 100}),
+    )
+    .await
+    .expect("expect 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+    assert!(
+        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        "expect data 的 newline=lf 应合法，收到参数错误: {r:?}"
+    );
+
+    // 6. 非法 read_mode → 协议级 invalid_params（含新模式的明确文案）
+    let r = call(
+        &client,
+        "uart_read",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "mode": "base64", "timeout_ms": 100}),
+    )
+    .await;
+    assert!(r.is_err(), "非法 read_mode 应触发 invalid_params");
+
+    client.cancel().await.expect("关闭客户端失败");
+}

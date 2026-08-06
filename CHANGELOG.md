@@ -2,6 +2,22 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- 返回编码新增 `read_mode="text-escaped"`：文本为主、非文本字节转义（`src/hex.rs` 新增 `encode_escaped`）。可打印 UTF-8 原样，`\r` `\n` `\t` 保留，其余控制字节（如 ANSI 颜色码的 ESC）与非法 UTF-8 字节转义为 `\xNN`，字面反斜杠转义为 `\\`；输出恒为合法文本、不降级。解决 `text` 模式"任一非文本字节导致整段日志降级 hex"的问题（`uart_read` / `uart_exchange` / `uart_expect` / `uart_expect_send` 均可用）
+- 发送新增 `newline` 参数（`none` 默认 / `lf` 追加 `\n` / `crlf` 追加 `\r\n`），作用于 `uart_write` / `uart_exchange` / `uart_expect` 的 `data`：终端命令（shell/uboot 等）显式传 `newline="crlf"` 即自动补齐行尾，避免命令不执行及残留行缓冲与下一条命令拼合（实测 "ls" + "ls /" 会执行 "lsls /"）
+
+### Changed
+
+- 发送编码（`mode`）与返回编码（`read_mode`）校验拆分：`text-escaped` 仅用于返回侧，发送侧误传会得到明确错误；`encode_send` / `encode_recv` 改为大小写不敏感（修复旧版传 `"TEXT"` 等大小写变体可能触发 `unreachable!` 的隐患）
+- `uart_write` / `uart_exchange` / `uart_expect` 返回值新增 `newline` 字段（回显实际使用的行尾）
+
+### Docs
+
+- `INSTRUCTIONS` 与 README（中英）新增"数据表示"章节：hex / text / text-escaped 三编码对照表、终端命令行尾必要性（含行缓冲污染风险）、pattern 字节层匹配对 ANSI 免疫（纯文本关键字可命中带颜色码的输出）、expect 消费后残留数据会混入下次读取的提示
+
 ## [0.5.0] - 2026-08-06
 
 ### Added
