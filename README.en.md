@@ -47,7 +47,7 @@ flowchart LR
 - **Full serial parameter control**: baudrate / data bits (5-8) / parity (none/even/odd) / stop bits (1,2) / flow control (none/software/hardware) / read timeout — all settable via `uart_open` / `uart_configure`
 - **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
-- **No data loss or blocking on ingress**: the event-driven reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
+- **Continuous ingress buffering**: the event-driven reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
 - **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text; `read_mode="text-escaped"` keeps text primary and escapes non-text bytes as `\xNN` (no fallback for terminal/log scenarios)
 - **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
 
@@ -166,6 +166,28 @@ Environment variables (optional):
 
 > **Terminal commands must end with a line terminator**: `uart_write` / `uart_exchange` / `uart_expect` accept a `newline` argument for `data` (`none` default / `lf` appends `\n` / `crlf` appends `\r\n`). Interactive terminals (shell, uboot, …) do not execute a command until it receives a carriage return; a command sent without a terminator also **stays in the device line buffer and merges with the next command** (measured: `"ls"` followed by `"ls /"` actually executes `"lsls /"`). So for terminal scenarios explicitly pass `newline="crlf"` or include `\r\n` in `data`.
 
+### Choosing an Encoding by Scenario (Minimal Examples)
+
+**Interactive terminal (Linux Shell / uboot)**: commands need a line terminator to execute; output often contains ANSI color codes.
+
+```
+uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}
+```
+
+- `newline="crlf"` appends `\r\n` automatically, so the command executes on return;
+- `read_mode="text-escaped"` keeps text primary and escapes control bytes (e.g. `\x1B[...`), keeping the whole output readable;
+- for multi-command flows, use `uart_expect` on a prompt anchor (e.g. `pattern: "# "`) to judge command completion.
+
+**MCU / AT command debugging**: protocols are byte-exact; no bytes should be appended implicitly.
+
+```
+uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}            // text command, terminator included in data
+uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}  // binary frame, exact hex transfer
+```
+
+- The defaults `newline="none"` and `mode="hex"` keep behavior identical to older versions and suit any protocol;
+- return `mode="text"` works only when the data is pure text — any non-text byte falls the whole result back to hex; switch to `read_mode="text-escaped"` in that case.
+
 ### Read Semantics (Core Design)
 
 Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools. `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
@@ -207,7 +229,7 @@ Behavior notes:
 - **timeout semantics**: if not matched within `timeout_ms` (default 5000), returns `matched=false`, `reason="timeout"`; data is not consumed (left buffered for diagnosis)
 - **overflow caveat**: if the buffer overflows and overwrites the pattern and the device never resends it, expect waits until timeout; `overflow_delta > 0` in the result helps identify this
 - **ANSI-immune**: pattern matching runs on the raw bytes and is independent of the return encoding — when device output contains ANSI color codes, a plain-text keyword (e.g. `"login:"`, `"# "`) still matches; read the result with `read_mode="text-escaped"`
-- **Residual data**: with `consume=true`, bytes after the pattern stay buffered and mix into the next `uart_read` / `uart_exchange` result (normal semantics — they are unread data); use `uart_clear` or drain with `uart_read` first when exact alignment matters
+- **Residual data**: after `consume=true`, bytes after the pattern stay buffered and mix into the next `uart_read` / `uart_exchange` result (normal semantics — they are unread data); use `uart_clear` or drain with `uart_read` first when exact alignment matters
 
 ### Usage Pattern: Short Commands + Output Anchors (recommended)
 
@@ -221,8 +243,8 @@ Behavior notes:
 ```
 1. uart_list_ports                      → find "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
-3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → send "AT\r\n", wait for reply
-4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command: appends \r\n, color output escaped & readable
+3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT command (hex, terminator included)
+4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command (see scenario above)
 5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
 6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
 7. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch

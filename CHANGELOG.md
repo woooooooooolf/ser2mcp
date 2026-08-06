@@ -17,6 +17,7 @@
 ### Docs
 
 - `INSTRUCTIONS` 与 README（中英）新增"数据表示"章节：hex / text / text-escaped 三编码对照表、终端命令行尾必要性（含行缓冲污染风险）、pattern 字节层匹配对 ANSI 免疫（纯文本关键字可命中带颜色码的输出）、expect 消费后残留数据会混入下次读取的提示
+- 新增"按场景选择编码"最简示例（`INSTRUCTIONS` 与 README 中英）：交互式终端（Linux Shell / uboot）用 `mode="text"` + `newline="crlf"` + `read_mode="text-escaped"`；MCU / AT 指令调试用 `mode="text"`（data 自带行尾）或 `mode="hex"`（缺省行为与旧版一致）
 
 ## [0.5.0] - 2026-08-06
 

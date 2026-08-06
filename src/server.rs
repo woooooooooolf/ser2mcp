@@ -19,7 +19,9 @@
 //! 命中与否不影响字节流的透传语义。
 //!
 //! 数据表示：串口数据是二进制，而 MCP 参数/返回值是文本，因此统一用
-//! hex 字符串（如 `"41 54 0D 0A"`）传递，`mode` 参数可切换为文本。
+//! hex 字符串（如 `"41 54 0D 0A"`）传递；`mode="text"` 切换 UTF-8 文本，
+//! `read_mode="text-escaped"` 文本为主、非文本字节 `\xNN` 转义（不降级）；
+//! 发送侧可经 `newline` 参数（none/lf/crlf）显式追加行尾。
 
 use std::sync::Arc;
 
@@ -38,7 +40,7 @@ use crate::manager::{
 /// 对 AI 助手的使用指引（随 initialize 返回）。
 const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不过滤字节流内容；uart_expect 系列仅在缓冲中做条件查找，不修改数据）。
 
-典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data}（写+读一步完成）；时序编排用 uart_expect（等待匹配输出）→ uart_close {port}。
+典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data} → uart_close {port}；时序编排用 uart_expect（等待匹配输出）。
 
 多端口：
 - 支持同时打开多个串口；端口名（如 "COM3" / "/dev/ttyUSB0"）就是句柄，
@@ -55,6 +57,15 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   否则命令停留在设备行缓冲不执行；且未带行尾的命令会残留缓冲、与下一条命令拼合执行
   （如 "ls" + "ls /" 会实际执行 "lsls /"），造成命令被篡改，务必避免。
 - 发送编码（mode）仅支持 hex 或 text；text-escaped 仅用于返回编码（read_mode）。
+
+最简示例（按设备类型选择编码）：
+- 交互式终端（Linux Shell / uboot）：命令需行尾触发，输出常含 ANSI 颜色码。
+  uart_exchange {port, data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}
+  newline="crlf" 自动追加 \r\n 使命令执行；text-escaped 使颜色码转义、输出可读；
+  多命令流程用 uart_expect 等提示符锚点（如 pattern: "# "）判断完成。
+- MCU / AT 指令调试：协议逐字节严格，不自动追加字节。
+  uart_exchange {port, data: "AT\r\n", mode: "text"} 或 uart_exchange {port, data: "AA 55 01 00 0D 0A", mode: "hex"}
+  缺省 newline="none"、mode="hex" 时行为与旧版一致，适配任意协议。
 
 读取语义（重要）：
 - 串口上行数据由事件驱动/非阻塞读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
@@ -74,7 +85,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 - 仅当设备没有明确锚点（如 AT 命令）时才用 uart_exchange 的 idle 判定收尾；
 - 慢操作（需数秒）不要靠加大 timeout_ms 干等——用 uart_expect 等锚点，命中即返回（毫秒级）。
 
-内容匹配语义（uart_expect / uart_expect_send，时序编排利器）：
+内容匹配语义（uart_expect / uart_expect_send）：
 - uart_expect 等待串口输出中出现指定 pattern（如 "Zynq>"、"Hit any key" 等提示符/关键字，
   pattern_mode="text"），命中或超时后返回；可选 data 实现"发送+等待"一步完成。
   consume=true（默认）时返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲；
@@ -85,9 +96,8 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   "命令执行完成判定"。
 - pattern 匹配作用于原始字节，与返回编码无关：设备输出带 ANSI 颜色码时，
   pattern 用纯文本关键字（如 "login:"、"# "）仍可命中，返回用 read_mode="text-escaped" 即可读。
-- consume=true 返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲，
-  会混入下一次 uart_read / uart_exchange 的返回值（属于未读数据，属正常语义）；
-  需要精确对齐时先 uart_clear 或先 uart_read 消费残留。
+- consume=true 消费后，pattern 之后的数据留在缓冲，会混入下一次 uart_read / uart_exchange
+  的返回值（属未读数据，正常语义）；需要精确对齐时先 uart_clear 或先 uart_read 消费残留。
 - 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
   返回值中的 overflow_delta > 0 可帮助识别该情况。
 
