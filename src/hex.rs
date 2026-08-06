@@ -246,7 +246,10 @@ mod tests {
     #[test]
     fn escaped_control_bytes() {
         // ESC 与 ANSI 颜色码
-        assert_eq!(encode_escaped(b"\x1b[31mBoot\x1b[0m"), "\\x1B[31mBoot\\x1B[0m");
+        assert_eq!(
+            encode_escaped(b"\x1b[31mBoot\x1b[0m"),
+            "\\x1B[31mBoot\\x1B[0m"
+        );
         // NUL 与 0x7F
         assert_eq!(encode_escaped(b"a\x00b\x7f"), "a\\x00b\\x7F");
         // 全字节扫描：除 \r \n \t 与可打印 ASCII 外均转义

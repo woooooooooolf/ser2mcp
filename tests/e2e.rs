@@ -273,7 +273,10 @@ async fn e2e_text_escaped_and_newline_params() {
         json!({"port": "COM_SER2MCP_NONEXISTENT", "data": "x", "mode": "text-escaped"}),
     )
     .await;
-    assert!(r.is_err(), "发送侧 text-escaped 应触发 invalid_params: {r:?}");
+    assert!(
+        r.is_err(),
+        "发送侧 text-escaped 应触发 invalid_params: {r:?}"
+    );
 
     // 2. 非法 newline 值 → 协议级 invalid_params
     let r = call(
@@ -294,7 +297,9 @@ async fn e2e_text_escaped_and_newline_params() {
     .expect("read 调用失败");
     assert!(r.is_error.unwrap_or(false));
     assert!(
-        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开"),
         "read_mode=text-escaped 应合法，收到参数错误: {r:?}"
     );
 
@@ -308,7 +313,9 @@ async fn e2e_text_escaped_and_newline_params() {
     .expect("exchange 调用失败");
     assert!(r.is_error.unwrap_or(false));
     assert!(
-        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开"),
         "newline=crlf 应合法，收到参数错误: {r:?}"
     );
 
@@ -322,7 +329,9 @@ async fn e2e_text_escaped_and_newline_params() {
     .expect("expect 调用失败");
     assert!(r.is_error.unwrap_or(false));
     assert!(
-        structured_error_of(&r).unwrap_or_default().contains("未打开"),
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开"),
         "expect data 的 newline=lf 应合法，收到参数错误: {r:?}"
     );
 

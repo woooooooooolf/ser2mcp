@@ -278,7 +278,9 @@ fn require_port(port: &str) -> Result<(), McpError> {
 fn parse_send_mode(s: &str) -> Result<(), String> {
     match s.to_ascii_lowercase().as_str() {
         "hex" | "text" => Ok(()),
-        "text-escaped" => Err("text-escaped 仅用于返回编码（read_mode），发送编码仅支持 hex 或 text".into()),
+        "text-escaped" => {
+            Err("text-escaped 仅用于返回编码（read_mode），发送编码仅支持 hex 或 text".into())
+        }
         other => Err(format!("mode 仅支持 hex 或 text，收到 {other:?}")),
     }
 }
@@ -287,7 +289,9 @@ fn parse_send_mode(s: &str) -> Result<(), String> {
 fn parse_recv_mode(s: &str) -> Result<(), String> {
     match s.to_ascii_lowercase().as_str() {
         "hex" | "text" | "text-escaped" => Ok(()),
-        other => Err(format!("read_mode 仅支持 hex、text 或 text-escaped，收到 {other:?}")),
+        other => Err(format!(
+            "read_mode 仅支持 hex、text 或 text-escaped，收到 {other:?}"
+        )),
     }
 }
 
@@ -535,7 +539,10 @@ impl Ser2Mcp {
         if let Err(e) = parse_send_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        let newline = args.newline.unwrap_or_else(|| "none".into()).to_ascii_lowercase();
+        let newline = args
+            .newline
+            .unwrap_or_else(|| "none".into())
+            .to_ascii_lowercase();
         if let Err(e) = parse_newline(&newline) {
             return Err(McpError::invalid_params(e, None));
         }
@@ -606,7 +613,10 @@ impl Ser2Mcp {
         if let Err(e) = parse_send_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        let newline = args.newline.unwrap_or_else(|| "none".into()).to_ascii_lowercase();
+        let newline = args
+            .newline
+            .unwrap_or_else(|| "none".into())
+            .to_ascii_lowercase();
         if let Err(e) = parse_newline(&newline) {
             return Err(McpError::invalid_params(e, None));
         }
