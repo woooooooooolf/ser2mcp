@@ -131,7 +131,7 @@ jobs:
         run: |
           VER="[${{ steps.version.outputs.version }}]"
           awk -v ver="$VER" '
-            /^## / { if (in_section) exit; if (index($0, ver)) in_section = 1 }
+            /^## / { if (in_section) exit; if (index($0, ver)) { in_section = 1; next } }
             in_section && !/^\[[^]]+\]:/ { print }
           ' CHANGELOG.md > release-notes.md
 
