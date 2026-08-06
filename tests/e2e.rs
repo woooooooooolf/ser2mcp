@@ -250,5 +250,14 @@ async fn e2e_tool_registration_and_errors() {
     .await;
     assert!(r.is_err(), "非法 pattern_mode 应触发 invalid_params");
 
+    // 17. 参数校验：timeout_ms 超上限 → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "timeout_ms": 999999999}),
+    )
+    .await;
+    assert!(r.is_err(), "timeout_ms 超上限应触发 invalid_params");
+
     client.cancel().await.expect("关闭客户端失败");
 }

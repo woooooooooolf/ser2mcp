@@ -37,6 +37,11 @@ pub const DEFAULT_IDLE_MS: u64 = 300;
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// 默认总等待超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+/// `uart_expect` / `uart_expect_send` 的 `timeout_ms` 上限（毫秒，5 分钟）。
+///
+/// expect 持有 `io_lock` 直到超时返回，期间其它工具调用全部排队；
+/// 上限防止 LLM 传入任意大值导致工具面长时间不可用。
+pub const MAX_EXPECT_TIMEOUT_MS: u64 = 300_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// 规范化后的串口运行时配置。
@@ -497,15 +502,22 @@ impl SerialManager {
             }
         }
 
-        // 消费状态：仅"命中且 consume=true"视为消费（更新溢出基线）；
-        // 否则不改变消费状态，后续 uart_read 的 overflow_delta 语义不受影响。
+        // 消费状态：仅"命中且 consume=true"视为消费（更新溢出基线），
+        // 后续 uart_read 的 overflow_delta 增量语义不受影响。
+        // - 超时未命中：只读计算 delta 报告自上次消费以来的数据缺口（帮助识别
+        //   "缓冲溢出覆盖了 pattern" 导致的超时），但不更新基线、不消费数据。
+        // - 命中但 consume=false：不消费、不更新基线，delta 无意义恒为 0。
         let (overflow_delta, overflow_total) = if matched && consume {
             let mut last = last_overflow.lock().unwrap();
             let delta = overflow_total.saturating_sub(*last);
             *last = overflow_total;
             (delta, overflow_total)
-        } else {
+        } else if matched {
             (0, overflow_total)
+        } else {
+            let last = last_overflow.lock().unwrap();
+            let delta = overflow_total.saturating_sub(*last);
+            (delta, overflow_total)
         };
         let (buffered, _) = buffer.stats();
 

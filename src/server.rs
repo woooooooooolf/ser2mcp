@@ -586,6 +586,15 @@ impl Ser2Mcp {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        if timeout_ms > manager::MAX_EXPECT_TIMEOUT_MS {
+            return Err(McpError::invalid_params(
+                format!(
+                    "timeout_ms 超出上限 {}ms（expect 期间其它工具调用会排队）",
+                    manager::MAX_EXPECT_TIMEOUT_MS
+                ),
+                None,
+            ));
+        }
         let consume = args.consume.unwrap_or(true);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&read_mode) {
@@ -648,6 +657,15 @@ impl Ser2Mcp {
             return Err(McpError::invalid_params("reply 不能为空", None));
         }
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        if timeout_ms > manager::MAX_EXPECT_TIMEOUT_MS {
+            return Err(McpError::invalid_params(
+                format!(
+                    "timeout_ms 超出上限 {}ms（expect 期间其它工具调用会排队）",
+                    manager::MAX_EXPECT_TIMEOUT_MS
+                ),
+                None,
+            ));
+        }
         let consume = args.consume.unwrap_or(true);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_mode(&read_mode) {
