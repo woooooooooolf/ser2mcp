@@ -160,7 +160,7 @@ Environment variables (optional):
 
 Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools. `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
 
-1. **Idle detection**: after new data arrives, no new bytes for `idle_ms` (default 300ms) → the response is considered complete (`reason: "idle"`)
+1. **Idle detection**: starting from the moment the **last byte** was received by the ring buffer, no new bytes for `idle_ms` (default 300ms) and no bytes left in the driver buffer → the response is considered complete (`reason: "idle"`)
 2. **Cap reached**: unread bytes ≥ `max_bytes` (default 64 KiB) → prevents backlog (`reason: "max_bytes"`)
 3. **Total timeout**: waiting exceeds `timeout_ms` (default 5000ms) (`reason: "timeout"`)
 
@@ -180,6 +180,8 @@ Example return value:
 
 > `overflow_delta > 0` means bytes were overwritten since the last read because the buffer was full — data has gaps; increase `buffer_size` or read more frequently.
 
+> **`idle_ms` semantics**: it measures the **silent gap inside a response** — chunks separated by less than `idle_ms` merge into one response, more than `idle_ms` split into two. It must be **larger than the device's response gap** (otherwise responses get truncated); lowering it reduces round-trip latency (judgement precision is limited by the 10ms poll). Note it measures "silence in the byte stream", **not command execution time** — for slow operations (taking seconds), do not wait by raising `idle_ms`; use `uart_expect` with an output anchor instead (see next section).
+
 ### Content-Match Semantics (uart_expect / uart_expect_send)
 
 Unlike the **time-based semantics** (idle detection) of `uart_read` / `uart_exchange`, the expect tools are **content-based**: they wait until a given string appears in the ingress, then return (or time out). This moves the "is the device ready?" decision into the server (match returns in milliseconds) and replaces AI-side `sleep` + blind-send timing loops:
@@ -195,6 +197,13 @@ Behavior notes:
 - **timeout semantics**: if not matched within `timeout_ms` (default 5000), returns `matched=false`, `reason="timeout"`; data is not consumed (left buffered for diagnosis)
 - **overflow caveat**: if the buffer overflows and overwrites the pattern and the device never resends it, expect waits until timeout; `overflow_delta > 0` in the result helps identify this
 
+### Usage Pattern: Short Commands + Output Anchors (recommended)
+
+- Send one **short command** at a time, then determine completion immediately — never blind-wait with `sleep`
+- Prefer **output anchors** to judge completion: `uart_expect` waits for a prompt/keyword (e.g. shell `# `, `$ `, or a device status string); once the anchor appears, the command is done — send the next one; use `uart_expect_send` for "act on match"
+- Fall back to `uart_exchange` idle semantics only when the device has no clear anchor (e.g. AT commands)
+- For slow operations (taking seconds), do not raise `timeout_ms` and wait idly — use `uart_expect` on an anchor; it returns in milliseconds once matched
+
 ## Typical Usage (AI Agent Perspective)
 
 ```
@@ -207,7 +216,7 @@ Behavior notes:
 7. uart_close {port: "COM3"}
 ```
 
-> **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms); lower it (e.g. 50ms) for `uart_exchange` / `uart_read` if you need lower latency — but keep it larger than the device's response gap, or the response may be truncated.
+> **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms) — tuning guidance is in the `idle_ms` semantics note above.
 
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
 
@@ -226,7 +235,7 @@ src/
 ├── lib.rs       # crate docs & module declarations
 ├── hex.rs       # hex encode/decode (hex/text dual mode)
 ├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify + pattern search)
-├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull)
+├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull / expect)
 ├── reader.rs    # event-driven / non-blocking reader thread (platform adaptation layer)
 └── server.rs    # MCP tool layer (11 tools + ServerHandler)
 tests/

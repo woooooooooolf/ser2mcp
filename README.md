@@ -160,7 +160,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 串口上行数据由事件驱动/非阻塞读线程**持续囤积**，工具**按需拉取**，`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
 
-1. **空闲判定**：出现新数据后持续 `idle_ms`（默认 300ms）无新字节 → 视为一次响应结束（`reason: "idle"`）
+1. **空闲判定**：以环形缓冲收到**最后一个字节**的时刻为起点，持续 `idle_ms`（默认 300ms）无新数据、且串口驱动侧无待搬入缓冲的字节 → 视为一次响应结束（`reason: "idle"`）
 2. **达到上限**：未读字节数 ≥ `max_bytes`（默认 64 KiB）→ 防堆积（`reason: "max_bytes"`）
 3. **总超时**：等待超过 `timeout_ms`（默认 5000ms）（`reason: "timeout"`）
 
@@ -180,6 +180,8 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 > `overflow_delta > 0` 表示自上次读取以来有数据因缓冲写满被覆盖丢弃——数据有缺口，应调大 `buffer_size` 或降低拉取间隔。
 
+> **`idle_ms` 的语义**：它判定的是**响应内部的静默间隙**——相邻数据块的间隔 < `idle_ms` 会合并为同一次响应，> `idle_ms` 会被截断为两次。因此它必须**大于设备的响应间隙**（否则响应被截断），调小则降低往返延迟（判定精度受 10ms 轮询限制）。注意它度量的是"字节流里的静默"，**不是命令执行时间**——慢操作（需数秒）不要靠加大 `idle_ms` 干等，应改用 `uart_expect` 等输出锚点（见下节）。
+
 ### 内容匹配语义（uart_expect / uart_expect_send）
 
 与 `uart_read` / `uart_exchange` 的**时间语义**（空闲判定）不同，expect 系列基于**内容匹配**：等待串口输出中出现指定字符串，命中（或超时）即返回，把"设备何时就绪"的判断交给服务器（命中即返回，毫秒级），替代 AI 侧 `sleep`+盲发 的时序编排：
@@ -195,6 +197,13 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 - **超时语义**：`timeout_ms`（默认 5000）内未命中返回 `matched=false`、`reason="timeout"`，数据不消费（留在缓冲供诊断）
 - **溢出注意**：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；返回值 `overflow_delta > 0` 可帮助识别该情况
 
+### 使用模式：短命令 + 输出锚点（推荐）
+
+- 一次只发一个**短命令**，发送后立即判断执行是否完成，不要用 `sleep` 盲等
+- 完成判定优先用**输出锚点**：`uart_expect` 等待提示符/关键字（如 shell 的 `# `、`$ ` 或设备状态字符串），锚点出现即完成，再发下一条；需要"完成即触发"用 `uart_expect_send`
+- 仅当设备没有明确锚点（如 AT 命令）时才用 `uart_exchange` 的 idle 判定收尾
+- 慢操作（需数秒）不要靠加大 `timeout_ms` 干等——用 `uart_expect` 等锚点，命中即返回（毫秒级）
+
 ## 典型用法（AI 助手视角）
 
 ```
@@ -207,7 +216,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 7. uart_close {port: "COM3"}
 ```
 
-> **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟。单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms）；如需更低延迟，可按设备响应节奏调小 `uart_exchange` / `uart_read` 的 `idle_ms`（例如 50ms；注意保持大于设备响应间隙，否则可能截断响应）。
+> **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟；单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms），调优见上文 `idle_ms` 语义。
 
 ## 回环自测（真实硬件，TX-RX 短接）
 
@@ -225,8 +234,8 @@ src/
 ├── main.rs      # 入口：stdio 传输启动
 ├── lib.rs       # crate 文档与模块声明
 ├── hex.rs       # hex 编解码（hex/text 双模式）
-├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒）
-├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取）
+├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒 + pattern 查找）
+├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取/期待匹配）
 ├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）
 └── server.rs    # MCP 工具层（11 个工具 + ServerHandler）
 tests/

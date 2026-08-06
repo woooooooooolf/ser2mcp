@@ -14,6 +14,11 @@
 
 - 工具面 9 → 11；`uart_exchange` / `uart_write` 等既有工具行为不变（内部写入路径抽取为 `write_locked` 复用）
 
+### Docs
+
+- 明确 `idle_ms` 空闲语义：判定起点为收到最后一个字节的时刻、响应内部静默间隙模型（< `idle_ms` 合并 / > `idle_ms` 截断）、驱动侧无残留字节的完整判定
+- 新增使用模式引导：短命令 + 输出锚点判断命令执行完成（`uart_expect` / `uart_expect_send`），同步至 `INSTRUCTIONS` 与 README（中英）
+
 ### Fixed
 
 - 修复 `uart_exchange` / `uart_read` 在大块数据流下的 idle 误判提前返回（[#2](https://github.com/woooooooooolf/ser2mcp/issues/2)）：空闲判定除环形缓冲 `idle_ms` 无新写入外，还需串口驱动侧无可读字节（`bytes_to_read() == 0`），避免读线程在"驱动缓冲排空后、剩余数据仍在线路/USB 传输中"的窗口期（Windows 实测可达数百 ms）被误判为响应结束、残留数据污染下一次调用（实测复现率 8/10 → 0/10）

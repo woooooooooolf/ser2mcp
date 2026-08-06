@@ -36,9 +36,9 @@ use crate::manager::{
 };
 
 /// 对 AI 助手的使用指引（随 initialize 返回）。
-const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不匹配、不过滤字节流内容）。
+const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不过滤字节流内容；uart_expect 系列仅在缓冲中做条件查找，不修改数据）。
 
-典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data}（写+读一步完成）→ uart_close {port}。
+典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data}（写+读一步完成）；时序编排用 uart_expect（等待匹配输出）→ uart_close {port}。
 
 多端口：
 - 支持同时打开多个串口；端口名（如 "COM3" / "/dev/ttyUSB0"）就是句柄，
@@ -53,11 +53,20 @@ const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传
 读取语义（重要）：
 - 串口上行数据由事件驱动/非阻塞读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
   工具按需拉取，而非设备主动推送。
-- uart_read / uart_exchange 在三种条件下返回：① 出现新数据后持续 idle_ms 无新字节
-  （视为一次响应结束，默认 300ms）；② 未读字节数达到 max_bytes（默认 64KiB）；
-  ③ 总等待超过 timeout_ms（默认 5000ms）。
+- uart_read / uart_exchange 在三种条件下返回：① 空闲判定：以收到最后一个字节为起点，
+  持续 idle_ms（默认 300ms）无新数据且驱动侧无残留字节（数据流中不算空闲）；
+  ② 未读字节数达到 max_bytes（默认 64KiB）；③ 总等待超过 timeout_ms（默认 5000ms）。
+- idle_ms 判定的是响应内部的静默间隙：相邻数据块间隔 < idle_ms 合并为一次响应，
+  > idle_ms 截断为两次；应大于设备响应间隙（否则截断），调小则降低延迟。
 - 返回值中的 overflow_delta / overflow_total 表示缓冲溢出被覆盖丢弃的字节数，
   大于 0 时说明数据有缺口，应调大 buffer_size 或减小拉取间隔。
+
+命令执行完成判定（重要）：
+- 一次只发一个短命令，发送后立即判断执行是否完成，不要用 sleep 盲等；
+- 完成判定优先用输出锚点：uart_expect 等待提示符/关键字（如 shell 的 "# "、"$ "
+  或设备状态字符串），锚点出现即完成，再发下一条；需要"完成即触发"用 uart_expect_send；
+- 仅当设备没有明确锚点（如 AT 命令）时才用 uart_exchange 的 idle 判定收尾；
+- 慢操作（需数秒）不要靠加大 timeout_ms 干等——用 uart_expect 等锚点，命中即返回（毫秒级）。
 
 内容匹配语义（uart_expect / uart_expect_send，时序编排利器）：
 - uart_expect 等待串口输出中出现指定 pattern（如 "Zynq>"、"Hit any key" 等提示符/关键字，
@@ -66,12 +75,12 @@ const INSTRUCTIONS: &str = r#"ser2mcp：UART 串口 MCP 服务器（原样透传
   consume=false 时纯等待、数据不消费。调用时缓冲中已有的数据立即参与匹配（可命中历史输出）。
 - uart_expect_send 等待 pattern 出现后在同一临界区内立即发送 reply（如
   {"pattern": "Hit any key", "reply": "\\n"} 抢 bootdelay 窗口），超时未命中时不发送。
-- 两者均为精确子串匹配（大小写敏感），不支持正则；替代"sleep + 盲发"的时序编排方式，
-  把"何时就绪"的判断交给服务器，命中即返回（毫秒级），比 AI 侧轮询快 1-2 个数量级。
+- 两者均为精确子串匹配（大小写敏感），不支持正则；命中即返回（毫秒级），时序编排见上文
+  "命令执行完成判定"。
 - 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
   返回值中的 overflow_delta > 0 可帮助识别该情况。
 
-回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"#;
+回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
 
 /// 串口工具参数：uart_open。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -133,7 +142,8 @@ pub struct WriteArgs {
 pub struct ReadArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 空闲判定阈值（毫秒）：出现新数据后持续该时长无新字节即返回，默认 300。
+    /// 空闲判定阈值（毫秒）：以收到最后一个字节为起点，持续该时长无新数据
+    /// 且驱动侧无残留字节即返回（响应内部静默间隙），默认 300。
     pub idle_ms: Option<u64>,
     /// 未读字节数达到该值立即返回（防堆积），默认 65536。
     pub max_bytes: Option<usize>,
@@ -152,7 +162,8 @@ pub struct ExchangeArgs {
     pub data: String,
     /// 发送编码：hex（默认）或 text。
     pub mode: Option<String>,
-    /// 空闲判定阈值（毫秒），默认 300。
+    /// 空闲判定阈值（毫秒）：以收到最后一个字节为起点，持续该时长无新数据
+    /// 且驱动侧无残留字节即返回（响应内部静默间隙），默认 300。
     pub idle_ms: Option<u64>,
     /// 未读字节数达到该值立即返回，默认 65536。
     pub max_bytes: Option<usize>,
@@ -474,8 +485,9 @@ impl Ser2Mcp {
         }
     }
 
-    /// 拉取串口上行缓冲：出现新数据后持续 idle_ms 无新字节（默认 300ms，视为一次响应结束）、
-    /// 未读字节数达 max_bytes、或总等待超时 timeout_ms（默认 5000ms）时返回全部未读数据。
+    /// 拉取串口上行缓冲：空闲判定（收到最后一个字节后持续 idle_ms 无新数据
+    /// 且驱动侧无残留字节）、未读字节数达 max_bytes、或总等待超时 timeout_ms
+    /// 三者之一满足时返回全部未读数据。
     /// 返回值含 overflow_delta/overflow_total（缓冲溢出被覆盖丢弃的字节数，>0 表示数据有缺口）。
     #[tool(
         description = "读取串口上行缓冲（port 必填；后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。"
