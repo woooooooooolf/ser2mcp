@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.5.1] - 2026-08-06
 
 ### Added
 
@@ -117,3 +117,4 @@
 [0.3.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.3.0
 [0.4.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.4.0
 [0.5.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.5.0
+[0.5.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.5.1

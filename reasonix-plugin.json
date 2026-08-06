@@ -1,6 +1,6 @@
 {
   "name": "ser2mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "UART 串口 MCP 服务器：把本地串口设备封装成标准 MCP 工具，让 AI 直接读写串口（枚举/打开/读写/重配置/状态/清缓冲/关闭，hex/text 双模式，后台读线程 + 环形缓冲不丢数据）",
   "homepage": "https://github.com/woooooooooolf/ser2mcp",
   "repository": "https://github.com/woooooooooolf/ser2mcp",
