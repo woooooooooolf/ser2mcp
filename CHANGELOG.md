@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.5.0] - 2026-08-06
 
 ### Added
 
@@ -18,6 +18,8 @@
 
 - 明确 `idle_ms` 空闲语义：判定起点为收到最后一个字节的时刻、响应内部静默间隙模型（< `idle_ms` 合并 / > `idle_ms` 截断）、驱动侧无残留字节的完整判定
 - 新增使用模式引导：短命令 + 输出锚点判断命令执行完成（`uart_expect` / `uart_expect_send`），同步至 `INSTRUCTIONS` 与 README（中英）
+
+## [0.4.0] - 2026-08-05
 
 ### Fixed
 
@@ -97,3 +99,4 @@
 [0.2.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.2.2
 [0.3.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.3.0
 [0.4.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.4.0
+[0.5.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.5.0
