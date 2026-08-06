@@ -48,7 +48,7 @@ flowchart LR
 - **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
 - **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
 - **上行数据不丢不堵**：事件驱动/非阻塞读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
-- **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本
+- **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本；`read_mode="text-escaped"` 文本为主、非文本字节 `\xNN` 转义（终端/日志场景不降级）
 - **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
 
 ## 快速安装
@@ -156,6 +156,16 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 > **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
 
+### 数据表示（hex / text / text-escaped）
+
+| 编码 | 发送（`mode`） | 返回（`read_mode`） | 说明 |
+|---|---|---|---|
+| `hex`（默认） | ✅ | ✅ | 每字节两个大写十六进制字符、空格分隔，二进制安全 |
+| `text` | ✅ | ✅ | UTF-8 字符串；返回时若含任一非文本字节则**整体降级为 hex**（严格判定） |
+| `text-escaped` | ❌ | ✅ | 文本为主：可打印 UTF-8 原样，`\r` `\n` `\t` 保留，控制字节（如 ANSI 颜色码的 ESC）与非法 UTF-8 字节转义为 `\xNN`，字面 `\` 转义为 `\\`；恒可读、不降级 |
+
+> **终端命令务必带行尾**：`uart_write` / `uart_exchange` / `uart_expect` 的 `data` 支持 `newline` 参数（`none` 默认 / `lf` 追加 `\n` / `crlf` 追加 `\r\n`）。shell、uboot 等交互式终端在收到回车前不会执行命令；不带行尾的命令还会**残留设备行缓冲、与下一条命令拼合执行**（实测 `"ls"` + `"ls /"` 会实际执行 `"lsls /"`），因此终端场景请显式传 `newline="crlf"` 或让 `data` 自带 `\r\n`。
+
 ### 读取语义（核心设计）
 
 串口上行数据由事件驱动/非阻塞读线程**持续囤积**，工具**按需拉取**，`uart_read` / `uart_exchange` 在以下三种条件之一满足时返回全部未读数据：
@@ -196,6 +206,8 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 - **consume 语义**：`consume=true`（默认）命中后取走并返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲（后续 `uart_read` 可取）；`consume=false` 纯等待、不消费数据
 - **超时语义**：`timeout_ms`（默认 5000）内未命中返回 `matched=false`、`reason="timeout"`，数据不消费（留在缓冲供诊断）
 - **溢出注意**：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；返回值 `overflow_delta > 0` 可帮助识别该情况
+- **ANSI 免疫**：pattern 匹配作用于原始字节、与返回编码无关——设备输出带 ANSI 颜色码时，pattern 用纯文本关键字（如 `"login:"`、`"# "`）仍可命中，返回用 `read_mode="text-escaped"` 即可读
+- **残留数据**：`consume=true` 命中后 pattern 之后的数据留在缓冲，会混入下一次 `uart_read` / `uart_exchange` 的返回值（属未读数据、正常语义）；需要精确对齐时先 `uart_clear` 或先 `uart_read` 消费残留
 
 ### 使用模式：短命令 + 输出锚点（推荐）
 
@@ -210,10 +222,11 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 1. uart_list_ports                      → 找到 "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → 发 "AT\r\n"，等回复
-4. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → 等提示符（时序编排）
-5. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → 命中即按键（抢 bootdelay 窗口）
-6. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
-7. uart_close {port: "COM3"}
+4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → 终端命令：自动追加 \r\n，彩色输出转义可读
+5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → 等提示符（时序编排）
+6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → 命中即按键（抢 bootdelay 窗口）
+7. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
+8. uart_close {port: "COM3"}
 ```
 
 > **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟；单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms），调优见上文 `idle_ms` 语义。
@@ -233,7 +246,7 @@ cargo run --release --example loopback -- COM3 115200 # 回环测试
 src/
 ├── main.rs      # 入口：stdio 传输启动
 ├── lib.rs       # crate 文档与模块声明
-├── hex.rs       # hex 编解码（hex/text 双模式）
+├── hex.rs       # hex 编解码（hex/text/text-escaped 三模式）
 ├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒 + pattern 查找）
 ├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取/期待匹配）
 ├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）

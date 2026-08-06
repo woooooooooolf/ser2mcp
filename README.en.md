@@ -48,7 +48,7 @@ flowchart LR
 - **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
 - **No data loss or blocking on ingress**: the event-driven reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
-- **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text
+- **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text; `read_mode="text-escaped"` keeps text primary and escapes non-text bytes as `\xNN` (no fallback for terminal/log scenarios)
 - **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
 
 ## Quick Install
@@ -156,6 +156,16 @@ Environment variables (optional):
 
 > **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
+### Data Representation (hex / text / text-escaped)
+
+| Encoding | Send (`mode`) | Return (`read_mode`) | Description |
+|---|---|---|---|
+| `hex` (default) | ✅ | ✅ | Two uppercase hex chars per byte, space-separated; binary-safe |
+| `text` | ✅ | ✅ | UTF-8 string; on return, falls back to hex **as a whole** if any byte is non-text (strict check) |
+| `text-escaped` | ❌ | ✅ | Text-first: printable UTF-8 kept as-is, `\r` `\n` `\t` preserved, control bytes (e.g. ESC of ANSI color codes) and invalid UTF-8 bytes escaped as `\xNN`, literal `\` escaped as `\\`; always readable, never falls back |
+
+> **Terminal commands must end with a line terminator**: `uart_write` / `uart_exchange` / `uart_expect` accept a `newline` argument for `data` (`none` default / `lf` appends `\n` / `crlf` appends `\r\n`). Interactive terminals (shell, uboot, …) do not execute a command until it receives a carriage return; a command sent without a terminator also **stays in the device line buffer and merges with the next command** (measured: `"ls"` followed by `"ls /"` actually executes `"lsls /"`). So for terminal scenarios explicitly pass `newline="crlf"` or include `\r\n` in `data`.
+
 ### Read Semantics (Core Design)
 
 Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools. `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
@@ -196,6 +206,8 @@ Behavior notes:
 - **consume semantics**: `consume=true` (default) takes and returns everything up to and including the pattern; bytes after the pattern stay buffered (readable later via `uart_read`). `consume=false` waits without consuming
 - **timeout semantics**: if not matched within `timeout_ms` (default 5000), returns `matched=false`, `reason="timeout"`; data is not consumed (left buffered for diagnosis)
 - **overflow caveat**: if the buffer overflows and overwrites the pattern and the device never resends it, expect waits until timeout; `overflow_delta > 0` in the result helps identify this
+- **ANSI-immune**: pattern matching runs on the raw bytes and is independent of the return encoding — when device output contains ANSI color codes, a plain-text keyword (e.g. `"login:"`, `"# "`) still matches; read the result with `read_mode="text-escaped"`
+- **Residual data**: with `consume=true`, bytes after the pattern stay buffered and mix into the next `uart_read` / `uart_exchange` result (normal semantics — they are unread data); use `uart_clear` or drain with `uart_read` first when exact alignment matters
 
 ### Usage Pattern: Short Commands + Output Anchors (recommended)
 
@@ -210,10 +222,11 @@ Behavior notes:
 1. uart_list_ports                      → find "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → send "AT\r\n", wait for reply
-4. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
-5. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
-6. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
-7. uart_close {port: "COM3"}
+4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command: appends \r\n, color output escaped & readable
+5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
+6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
+7. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
+8. uart_close {port: "COM3"}
 ```
 
 > **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms) — tuning guidance is in the `idle_ms` semantics note above.
@@ -233,7 +246,7 @@ cargo run --release --example loopback -- COM3 115200 # loopback test
 src/
 ├── main.rs      # entry point: stdio transport
 ├── lib.rs       # crate docs & module declarations
-├── hex.rs       # hex encode/decode (hex/text dual mode)
+├── hex.rs       # hex encode/decode (hex/text/text-escaped triple mode)
 ├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify + pattern search)
 ├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull / expect)
 ├── reader.rs    # event-driven / non-blocking reader thread (platform adaptation layer)

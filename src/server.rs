@@ -49,6 +49,12 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 - 二进制一律用 hex 字符串传递（如 "41 54 0D 0A"），每字节两个大写十六进制字符、空格分隔；
   也接受连续串（"41540D0A"）、逗号/分号/0x 前缀等宽松形式。
 - 文本模式（mode="text"）下直接传 UTF-8 字符串；返回时若数据非合法文本则自动降级为 hex。
+- read_mode="text-escaped"（推荐终端/日志场景）：文本为主，控制字节（如 ANSI 颜色码的 ESC）
+  与非法 UTF-8 字节转义为 \xNN（如 \x1B），\r\n\t 保留，恒可读、不降级；字面反斜杠转义为 \\。
+- 发送终端命令（shell/uboot 等）务必带行尾：传 newline="crlf"（追加 \r\n）或 data 自带 \r\n，
+  否则命令停留在设备行缓冲不执行；且未带行尾的命令会残留缓冲、与下一条命令拼合执行
+  （如 "ls" + "ls /" 会实际执行 "lsls /"），造成命令被篡改，务必避免。
+- 发送编码（mode）仅支持 hex 或 text；text-escaped 仅用于返回编码（read_mode）。
 
 读取语义（重要）：
 - 串口上行数据由事件驱动/非阻塞读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
@@ -77,6 +83,11 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   {"pattern": "Hit any key", "reply": "\\n"} 抢 bootdelay 窗口），超时未命中时不发送。
 - 两者均为精确子串匹配（大小写敏感），不支持正则；命中即返回（毫秒级），时序编排见上文
   "命令执行完成判定"。
+- pattern 匹配作用于原始字节，与返回编码无关：设备输出带 ANSI 颜色码时，
+  pattern 用纯文本关键字（如 "login:"、"# "）仍可命中，返回用 read_mode="text-escaped" 即可读。
+- consume=true 返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲，
+  会混入下一次 uart_read / uart_exchange 的返回值（属于未读数据，属正常语义）；
+  需要精确对齐时先 uart_clear 或先 uart_read 消费残留。
 - 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
   返回值中的 overflow_delta > 0 可帮助识别该情况。
 
@@ -135,6 +146,9 @@ pub struct WriteArgs {
     pub data: String,
     /// 数据编码：hex（默认）或 text。
     pub mode: Option<String>,
+    /// 发送后追加的行尾：none（默认，原样发送）/ lf（追加 \n）/ crlf（追加 \r\n）。
+    /// 终端命令（shell/uboot 等）建议 crlf，否则命令可能不执行。
+    pub newline: Option<String>,
 }
 
 /// 串口工具参数：uart_read。
@@ -149,7 +163,8 @@ pub struct ReadArgs {
     pub max_bytes: Option<usize>,
     /// 总等待超时（毫秒），默认 5000。
     pub timeout_ms: Option<u64>,
-    /// 返回编码：hex（默认）或 text（非文本数据自动降级为 hex）。
+    /// 返回编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped
+    /// （文本为主，控制字节/非法 UTF-8 以 \xNN 转义，恒可读不降级）。
     pub mode: Option<String>,
 }
 
@@ -162,6 +177,8 @@ pub struct ExchangeArgs {
     pub data: String,
     /// 发送编码：hex（默认）或 text。
     pub mode: Option<String>,
+    /// 发送后追加的行尾：none（默认）/ lf / crlf。终端命令建议 crlf。
+    pub newline: Option<String>,
     /// 空闲判定阈值（毫秒）：以收到最后一个字节为起点，持续该时长无新数据
     /// 且驱动侧无残留字节即返回（响应内部静默间隙），默认 300。
     pub idle_ms: Option<u64>,
@@ -169,7 +186,7 @@ pub struct ExchangeArgs {
     pub max_bytes: Option<usize>,
     /// 总等待超时（毫秒），默认 5000。
     pub timeout_ms: Option<u64>,
-    /// 返回编码：hex（默认）或 text。
+    /// 返回编码：hex（默认）、text 或 text-escaped。
     pub read_mode: Option<String>,
 }
 
@@ -212,7 +229,9 @@ pub struct ExpectArgs {
     pub data: Option<String>,
     /// data 的编码：hex（默认）或 text。
     pub mode: Option<String>,
-    /// 返回 data 字段的编码：hex（默认）或 text（非文本数据自动降级为 hex）。
+    /// data 发送后追加的行尾：none（默认）/ lf / crlf。终端命令建议 crlf。
+    pub newline: Option<String>,
+    /// 返回 data 字段的编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped。
     pub read_mode: Option<String>,
 }
 
@@ -233,7 +252,7 @@ pub struct ExpectSendArgs {
     pub timeout_ms: Option<u64>,
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true。
     pub consume: Option<bool>,
-    /// 返回 data 字段的编码：hex（默认）或 text（非文本数据自动降级为 hex）。
+    /// 返回 data 字段的编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped。
     pub read_mode: Option<String>,
 }
 
@@ -245,26 +264,58 @@ fn require_port(port: &str) -> Result<(), McpError> {
     }
 }
 
-fn parse_mode(s: &str) -> Result<(), String> {
+/// 校验发送编码模式：hex 或 text（text-escaped 仅用于返回侧）。
+fn parse_send_mode(s: &str) -> Result<(), String> {
     match s.to_ascii_lowercase().as_str() {
         "hex" | "text" => Ok(()),
+        "text-escaped" => Err("text-escaped 仅用于返回编码（read_mode），发送编码仅支持 hex 或 text".into()),
         other => Err(format!("mode 仅支持 hex 或 text，收到 {other:?}")),
     }
 }
 
-/// 按 mode 编码发送数据。
-fn encode_send(data: &str, mode: &str) -> Result<Vec<u8>, String> {
-    match mode {
-        "hex" => hex::decode(data),
-        "text" => Ok(data.as_bytes().to_vec()),
-        _ => unreachable!("mode 已校验"),
+/// 校验返回编码模式：hex、text 或 text-escaped。
+fn parse_recv_mode(s: &str) -> Result<(), String> {
+    match s.to_ascii_lowercase().as_str() {
+        "hex" | "text" | "text-escaped" => Ok(()),
+        other => Err(format!("read_mode 仅支持 hex、text 或 text-escaped，收到 {other:?}")),
     }
 }
 
-/// 按 mode 编码返回数据；text 模式下非法文本自动降级为 hex。
+/// 校验换行参数：none / lf / crlf。
+fn parse_newline(s: &str) -> Result<(), String> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" | "lf" | "crlf" => Ok(()),
+        other => Err(format!("newline 仅支持 none、lf 或 crlf，收到 {other:?}")),
+    }
+}
+
+/// 按 newline 参数在发送数据末尾追加行尾字节（none 时原样）。
+fn apply_newline(mut data: Vec<u8>, newline: &str) -> Vec<u8> {
+    match newline {
+        "lf" => data.extend_from_slice(b"\n"),
+        "crlf" => data.extend_from_slice(b"\r\n"),
+        _ => {}
+    }
+    data
+}
+
+/// 按 mode 编码发送数据（大小写不敏感）。
+fn encode_send(data: &str, mode: &str) -> Result<Vec<u8>, String> {
+    match mode.to_ascii_lowercase().as_str() {
+        "hex" => hex::decode(data),
+        "text" => Ok(data.as_bytes().to_vec()),
+        _ => Err(format!("mode 仅支持 hex 或 text，收到 {mode:?}")),
+    }
+}
+
+/// 按 mode 编码返回数据（大小写不敏感）：
+/// - `hex`：全 hex；
+/// - `text-escaped`：文本为主，非文本字节 `\xNN` 转义（恒为合法文本，不降级）；
+/// - `text`：合法文本原样，非法时整体降级为 hex。
 fn encode_recv(bytes: &[u8], mode: &str) -> (String, String) {
-    match mode {
+    match mode.to_ascii_lowercase().as_str() {
         "hex" => (hex::encode(bytes), "hex".to_string()),
+        "text-escaped" => (hex::encode_escaped(bytes), "text-escaped".to_string()),
         _ => {
             if hex::is_text(bytes) {
                 (
@@ -291,6 +342,7 @@ fn expect_result(
     outcome: manager::ExpectOutcome,
     pattern: &str,
     read_mode: &str,
+    newline: &str,
 ) -> CallToolResult {
     let (data, used_mode) = encode_recv(&outcome.data, read_mode);
     CallToolResult::structured(json!({
@@ -299,6 +351,7 @@ fn expect_result(
         "data": data,
         "bytes": outcome.data.len(),
         "mode": used_mode,
+        "newline": newline,
         "written": outcome.written,
         "reason": match outcome.reason {
             manager::ExpectReason::Matched => "matched",
@@ -469,17 +522,22 @@ impl Ser2Mcp {
     ) -> Result<CallToolResult, McpError> {
         require_port(&args.port)?;
         let mode = args.mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&mode) {
+        if let Err(e) = parse_send_mode(&mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let newline = args.newline.unwrap_or_else(|| "none".into()).to_ascii_lowercase();
+        if let Err(e) = parse_newline(&newline) {
             return Err(McpError::invalid_params(e, None));
         }
         let data = match encode_send(&args.data, &mode) {
-            Ok(d) => d,
+            Ok(d) => apply_newline(d, &newline),
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
         match self.manager.write(&args.port, &data).await {
             Ok(written) => Ok(CallToolResult::structured(json!({
                 "written": written,
-                "mode": mode,
+                "mode": mode.to_ascii_lowercase(),
+                "newline": newline,
             }))),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
@@ -501,7 +559,7 @@ impl Ser2Mcp {
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         let mode = args.mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&mode) {
+        if let Err(e) = parse_recv_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
         }
         match self
@@ -535,18 +593,22 @@ impl Ser2Mcp {
     ) -> Result<CallToolResult, McpError> {
         require_port(&args.port)?;
         let mode = args.mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&mode) {
+        if let Err(e) = parse_send_mode(&mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let newline = args.newline.unwrap_or_else(|| "none".into()).to_ascii_lowercase();
+        if let Err(e) = parse_newline(&newline) {
             return Err(McpError::invalid_params(e, None));
         }
         let data = match encode_send(&args.data, &mode) {
-            Ok(d) => d,
+            Ok(d) => apply_newline(d, &newline),
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&read_mode) {
+        if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         match self.manager.write(&args.port, &data).await {
@@ -562,6 +624,7 @@ impl Ser2Mcp {
                         "data": resp,
                         "bytes": outcome.data.len(),
                         "mode": used_mode,
+                        "newline": newline,
                         "reason": read_reason_str(outcome.reason),
                         "overflow_delta": outcome.overflow_delta,
                         "overflow_total": outcome.overflow_total,
@@ -587,7 +650,7 @@ impl Ser2Mcp {
     ) -> Result<CallToolResult, McpError> {
         require_port(&args.port)?;
         let pattern_mode = args.pattern_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&pattern_mode) {
+        if let Err(e) = parse_send_mode(&pattern_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         let pattern = match encode_send(&args.pattern, &pattern_mode) {
@@ -609,17 +672,24 @@ impl Ser2Mcp {
         }
         let consume = args.consume.unwrap_or(true);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&read_mode) {
+        if let Err(e) = parse_recv_mode(&read_mode) {
+            return Err(McpError::invalid_params(e, None));
+        }
+        let newline = args
+            .newline
+            .unwrap_or_else(|| "none".into())
+            .to_ascii_lowercase();
+        if let Err(e) = parse_newline(&newline) {
             return Err(McpError::invalid_params(e, None));
         }
         let send = match args.data {
             Some(d) => {
                 let mode = args.mode.unwrap_or_else(|| "hex".into());
-                if let Err(e) = parse_mode(&mode) {
+                if let Err(e) = parse_send_mode(&mode) {
                     return Err(McpError::invalid_params(e, None));
                 }
                 match encode_send(&d, &mode) {
-                    Ok(bytes) => Some(bytes),
+                    Ok(bytes) => Some(apply_newline(bytes, &newline)),
                     Err(e) => return Err(McpError::invalid_params(e, None)),
                 }
             }
@@ -630,7 +700,7 @@ impl Ser2Mcp {
             .expect(&args.port, send.as_deref(), &pattern, timeout_ms, consume)
             .await
         {
-            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode)),
+            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, &newline)),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
@@ -647,7 +717,7 @@ impl Ser2Mcp {
     ) -> Result<CallToolResult, McpError> {
         require_port(&args.port)?;
         let pattern_mode = args.pattern_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&pattern_mode) {
+        if let Err(e) = parse_send_mode(&pattern_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         let pattern = match encode_send(&args.pattern, &pattern_mode) {
@@ -658,7 +728,7 @@ impl Ser2Mcp {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
         let reply_mode = args.reply_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&reply_mode) {
+        if let Err(e) = parse_send_mode(&reply_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         let reply = match encode_send(&args.reply, &reply_mode) {
@@ -680,7 +750,7 @@ impl Ser2Mcp {
         }
         let consume = args.consume.unwrap_or(true);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
-        if let Err(e) = parse_mode(&read_mode) {
+        if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         match self
@@ -688,7 +758,7 @@ impl Ser2Mcp {
             .expect_send(&args.port, &pattern, &reply, timeout_ms, consume)
             .await
         {
-            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode)),
+            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, "none")),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
