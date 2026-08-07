@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- 插件包升级 Manifest v1（`reasonix-plugin.json` 增加 `apiVersion: reasonix.io/plugin/v1` 与 `contributes.skills`），新增两个 AI 使用 SKILL（`skills/` 目录，通用 Agent Skills 格式）：
+  - `ser2mcp-usage`：工具速查、数据表示与编码选择、读取/expect 语义、命令完成判定、故障排查
+  - `ser2mcp-file-transfer`：文件流式发送完整流程（估算/发送/EOF/对账、chunk_size 选择、对端 tty 注意事项）
+- Reasonix 插件安装即获得 SKILL（`/ser2mcp:<skill>` 命名空间调用或按 description 自动选择）；Claude Code / Codex 可将 `skills/` 挂载为 `.claude/skills/` 直接使用
+
+### Changed
+
+- README（中英）精简：操作指南（数据表示/读取语义/内容匹配/文件发送/典型用法）压缩为要点 + SKILL 指针，新增"AI Agent 兼容"小节
+
 ## [0.6.0] - 2026-08-07
 
 ### Added
