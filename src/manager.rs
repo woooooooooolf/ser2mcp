@@ -1,13 +1,16 @@
-//! 串口管理器：打开/配置/事件驱动读线程/写/读取/期待匹配（uart_expect 系列）。
+//! 串口管理器：打开/配置/事件驱动读线程/写/读取/期待匹配/文件发送（uart_send_file 系列）。
 //! 支持同时打开多个串口，以端口名为句柄；工具调用全局串行化（AI 回合制调用天然串行）。
 //!
 //! 架构：
 //! ```text
-//! 串口 ──► 事件驱动读线程(生产者) ──► RingBuf(有界环形缓冲) ──► uart_read/uart_exchange(消费者)
+//! 上行：串口 ──► 事件驱动读线程(生产者) ──► RingBuf(有界环形缓冲) ──► uart_read/uart_exchange/uart_expect(消费者)
+//! 下行：uart_write / uart_send_file ──► 写句柄（io_lock 临界区内循环写 + flush）──► 串口
 //! ```
 //! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
-//! - 所有写/读/配置操作经 `io_lock` 串行化，保证 AI 回合制调用下语义清晰。
+//! - 写/配置/期待/文件发送经 `io_lock` 串行化；read/available/clear 不持有锁，直接操作缓冲；
+//! - 文件发送每片检查点检测：取消标志（uart_send_cancel / uart_close）、客户端取消令牌、
+//!   端口是否仍打开、读线程致命错误（设备物理断开等，返回 reason="device_error"）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

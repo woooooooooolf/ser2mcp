@@ -206,6 +206,20 @@ For large payloads (a few KB or more — firmware download / file transfer), **d
 3. Reconcile: compare with the peer's wc -c / md5sum (sent_bytes ↔ wc -c; raw_bytes ↔ decoded byte count)
 ```
 
+**Complete example** (base64 file transfer to a Linux board, end-to-end reconcilable):
+
+```
+# 1. Peer starts receiving (icanon line reads; use newline="lf" for a Linux shell to avoid \r residue)
+uart_exchange {port, data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}
+# 2. Send in one call (base64 wraps every 76 chars, trailing \n appended)
+uart_send_file {port, path: "C:/tmp/fw.bin", mode: "base64", chunk_size: 256}
+# 3. Send \x04 to end the peer's cat (triggers EOF under icanon)
+uart_write {port, data: "04"}
+# 4. Reconcile: wc -c should equal sent_bytes; md5sum should match the local file
+uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
+# If reason=cancelled / device_error or sent_bytes < raw_bytes: reconcile the partial progress, then resend
+```
+
 **Parameters & semantics:**
 
 | Param | Description |
@@ -295,6 +309,16 @@ Behavior notes:
 8. uart_close {port: "COM3"}
 ```
 
+File transfer scenario (large files: use `uart_send_file` in one call, do not chunk with `uart_write`; see the "File Send" section):
+
+```
+1. uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → estimate duration/bytes first
+2. uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → peer starts receiving
+3. uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → send in one call
+4. uart_write {port: "COM3", data: "04"}                                  → send \x04 to end the peer's cat (EOF)
+5. uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → reconcile (wc -c should equal sent_bytes)
+```
+
 > **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms) — tuning guidance is in the `idle_ms` semantics note above.
 
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
@@ -314,11 +338,15 @@ src/
 ├── lib.rs       # crate docs & module declarations
 ├── hex.rs       # hex encode/decode (hex/text/text-escaped triple mode)
 ├── ring.rs      # bounded ring buffer (overwrite-oldest + overflow counter + Notify + pattern search)
-├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull / expect)
+├── sendfile.rs  # streaming file send (chunked read + base64 encoding + time estimation)
+├── manager.rs   # serial manager (open / re-configure / reader thread / write / pull / expect / file send)
 ├── reader.rs    # event-driven / non-blocking reader thread (platform adaptation layer)
-└── server.rs    # MCP tool layer (11 tools + ServerHandler)
+└── server.rs    # MCP tool layer (14 tools + ServerHandler)
 tests/
-└── e2e.rs       # end-to-end MCP protocol tests (real subprocess handshake)
+├── e2e.rs       # end-to-end MCP protocol tests (real subprocess handshake, no hardware)
+└── loopback.rs  # real-hardware loopback tests (#[ignore]; SER2MCP_LOOPBACK_PORT selects the port)
+scripts/
+└── mcp_cli.py   # lightweight MCP stdio CLI client (batch calls from a JSON action sequence)
 examples/
 ├── loopback.rs      # loopback self-test tool
 └── latency_probe.rs # latency probe (bench/benchw, real-hardware load test)

@@ -206,6 +206,20 @@ uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}      // 二
 3. 对账：与对端 wc -c / md5sum 比对（sent_bytes 应对应 wc -c；raw_bytes 应对应解码后字节数）
 ```
 
+**完整示例**（base64 传文件到 Linux 板，端到端可对账）：
+
+```
+# 1. 对端开始接收（icanon 行读；Linux shell 用 newline="lf" 避免 \r 残留）
+uart_exchange {port, data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}
+# 2. 一次调用发完（base64 自动每 76 字符换行、末尾补 \n）
+uart_send_file {port, path: "C:/tmp/fw.bin", mode: "base64", chunk_size: 256}
+# 3. 补 \x04 结束对端 cat（对端 icanon 下触发 EOF）
+uart_write {port, data: "04"}
+# 4. 对账：wc -c 应与 sent_bytes 一致，md5sum 应与本地文件一致
+uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
+# 若 reason=cancelled / device_error 或 sent_bytes < raw_bytes：按已发部分对账后重发
+```
+
 **参数与语义**：
 
 | 参数 | 说明 |
@@ -295,6 +309,16 @@ uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}      // 二
 8. uart_close {port: "COM3"}
 ```
 
+文件传输场景（大文件用 `uart_send_file` 一次调用，勿逐块 `uart_write`；详见"文件发送"章节）：
+
+```
+1. uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → 先估算耗时/字节数
+2. uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → 对端开始接收
+3. uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → 一次发送
+4. uart_write {port: "COM3", data: "04"}                                  → 补 \x04 结束对端 cat（EOF）
+5. uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → 对账（wc -c 应等于 sent_bytes）
+```
+
 > **延迟提示（AI 工具注意）**：ser2mcp 使用事件驱动/非阻塞读线程（Unix `poll`、Windows 1ms 轮询），`read_timeout_ms`（默认 500ms）只是读安全上限，不影响读写延迟；单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms），调优见上文 `idle_ms` 语义。
 
 ## 回环自测（真实硬件，TX-RX 短接）
@@ -314,11 +338,15 @@ src/
 ├── lib.rs       # crate 文档与模块声明
 ├── hex.rs       # hex 编解码（hex/text/text-escaped 三模式）
 ├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒 + pattern 查找）
-├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取/期待匹配）
+├── sendfile.rs  # 文件流式发送（分块 + base64 编码 + 耗时估算）
+├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取/期待匹配/文件发送）
 ├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）
-└── server.rs    # MCP 工具层（11 个工具 + ServerHandler）
+└── server.rs    # MCP 工具层（14 个工具 + ServerHandler）
 tests/
-└── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手）
+├── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手，无硬件）
+└── loopback.rs  # 真实硬件回环测试（#[ignore]，SER2MCP_LOOPBACK_PORT 指定端口）
+scripts/
+└── mcp_cli.py   # 轻量 MCP stdio 命令行客户端（动作序列批量调用）
 examples/
 ├── loopback.rs      # 回环自测工具
 └── latency_probe.rs # 延迟探针（bench/benchw，真实硬件压测）

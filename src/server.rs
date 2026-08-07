@@ -122,6 +122,15 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   reason="device_error" + device_error 详情（写侧可能仍"假成功"，须以此为准并做对端对账）。
 - 大文件耗时可能很长（1 MiB @115200 ≈ 87 秒），务必先估算再发，并提示用户预期等待时间。
 
+文件发送完整示例（base64 传文件到 Linux 板，端到端可对账）：
+  uart_exchange {port, data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  // 对端开始接收
+  uart_send_file {port, path: "C:/tmp/fw.bin", mode: "base64", chunk_size: 256}            // 一次调用发完
+  uart_write {port, data: "04"}                                                            // 补 \x04 结束对端 cat（EOF）
+  uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
+  // 对账：wc -c 应与返回的 sent_bytes 一致，md5sum 应与本地文件一致；
+  // reason=cancelled/device_error 或 sent_bytes < raw_bytes 时说明未发完，按已发部分对账后重发。
+  // 注：对端为 Linux shell 时命令可用 newline="lf"（避免 \r 残留）；uboot 等只认 \r 的设备用 crlf。
+
 回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
 
 /// 串口工具参数：uart_open。
@@ -679,7 +688,7 @@ impl Ser2Mcp {
     /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
     /// / 客户端取消通知（notifications/cancelled）均可中止。
     #[tool(
-        description = "文件流式发送（port、path 必填）：分片限速发送本地文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（编码后发，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256（模型须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0。只发字节、不解析、不主动发 EOF。返回 raw_bytes/sent_bytes/chunks/elapsed_ms/overflow 统计，可与对端 wc -c 对账。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+        description = "文件流式发送（port、path 必填）：分片限速发送本地文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（编码后发，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256（模型须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计，可与对端 wc -c 对账；reason=device_error（设备断开等读线程致命错误）或 cancelled 时按 sent_bytes 对账后重发。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
     )]
     async fn uart_send_file(
         &self,
