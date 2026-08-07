@@ -148,7 +148,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | `uart_configure` | 运行时重配置（`port` 必填，仅更新传入项） |
 | `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
 | `uart_read` | 拉取上行缓冲（`port` 必填） |
-| `uart_exchange` | 发送 + 读取一步完成（`port` 必填，最常用） |
+| `uart_exchange` | 发送 + 读取一步完成（`port` 必填；短命令，idle 收尾） |
 | `uart_expect` | 等待匹配输出：阻塞直到串口输出中出现指定 pattern 或超时（`port`、`pattern` 必填；可选 `data` 实现"发送+等待"） |
 | `uart_expect_send` | 匹配后立即发送：等待 pattern 出现后在同一临界区内发送 reply（`port`、`pattern`、`reply` 必填） |
 | `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误、文件发送进度（`port` 必填） |
@@ -159,7 +159,6 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | `uart_send_cancel` | 中止进行中的文件发送（`port` 必填；无传输时为 no-op） |
 
 > **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
-
 
 ### 使用说明（AI Agent 阅读）
 
@@ -183,7 +182,7 @@ uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                      
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # 二进制帧
 uart_expect    {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}  # 发送+等提示符收尾一步完成
 uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # 等待提示符
-uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}           # 命中即按键
+uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}           # 命中即按键
 ```
 
 ### AI Agent 兼容
@@ -201,7 +200,7 @@ SKILL 使用通用 Agent Skills 格式（`SKILL.md`，frontmatter 含 `name` / `
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT 指令（hex）
 4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → 终端命令
 5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → 等待提示符（时序编排）
-6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → 抢 bootdelay 窗口
+6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}  → 抢 bootdelay 窗口
 7. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
 8. uart_close {port: "COM3"}
 ```
@@ -215,6 +214,7 @@ uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → 一次
 uart_write {port: "COM3", data: "04"}                                  → 补 \x04 结束对端 cat（EOF）
 uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → 对账
 ```
+
 ## 回环自测（真实硬件，TX-RX 短接）
 
 内置一键自测工具：枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：

@@ -64,13 +64,12 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 
 **语义边界**：`reason: "idle"` 只表示字节流出现静默，**不等于命令执行完成**——慢命令输出中途的静默间隙、或命令失败无输出时，idle 同样会返回。命令是否完成用 §5 的锚点判定，不要用 idle 推断。
 
-
 ## 5. 命令完成判定（重要）
 
 - 优先用**输出锚点**：`uart_expect` 等待提示符/关键字（shell 的 `"# "`、`"$ "`、uboot 的 `"Zynq>"`、`"login:"` 等），锚点出现即完成，再发下一条；命中即返回（毫秒级），**有锚点时不要靠加大 timeout 干等**。提示符**因设备而异、无通用提示符**；提示符不可用（如 echo 关闭、无提示符设备）时，改用命令特有的结束标记（如 `wc -c` 的输出行、`OK` 等状态串）。
 - **长命令（wget/tar 解包等，存在中间静默期）**：`uart_expect` 的语义是"等 pattern 或超时"，**与 idle 无关**，天然适配长操作。其 `timeout_ms` 只是兜底上限（上限 5 分钟），命中即提前返回（毫秒级），放大无成本——无中间锚点的长命令，把 `timeout_ms` 放大到覆盖整个命令时长即可；**不要**用 `uart_exchange` 的 idle 判定干等。
 - **可选对齐（tty 处于 icanon 时）**：可发送 `\x15`（Ctrl+U）清空板端行缓冲残留、`\x03`（Ctrl+C）中断当前命令，作为每条命令前的对齐步骤；`uart_clear` 只清宿主上行缓冲，**覆盖不到板端残留**。tty 非 icanon（如 `stty raw` 后）时这些控制字节只是普通数据、无效。是否需要对齐由 AI 依据现场判断。
-- 需要"完成即触发"用 `uart_expect_send`（pattern 命中后在同一临界区内立即发送 reply，如 `{pattern: "Hit any key", reply: "\n"}` 抢 bootdelay 窗口）。
+- 需要"完成即触发"用 `uart_expect_send`（pattern 命中后在同一临界区内立即发送 reply，如 `{pattern: "Hit any key", reply: "\n", reply_mode: "text"}` 抢 bootdelay 窗口）。
 - 仅当设备没有明确锚点（如 AT 命令）时才用 `uart_exchange` 的 idle 判定收尾。
 - `pattern` 是**精确子串匹配**（大小写敏感，不支持正则），作用于原始字节：设备输出带 ANSI 颜色码时用纯文本关键字（`"login:"`）仍可命中，返回用 `read_mode="text-escaped"` 即可读。
 - **历史数据立即参与匹配**：调用时缓冲中已囤积的数据（如 `uart_open` 后设备启动的 bootlog）直接参与查找，可能无需等待即命中。
@@ -95,7 +94,7 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 
 **边界**：ser2mcp 仅提供字节透传与等待/读取原语，不做设备状态管理；环境清理、状态恢复与调试策略属于 AI 的工作范畴，本指南不指导具体调试动作。`uart_available`（配置/缓冲/溢出/读线程错误）与读取回显是获取环境信息的渠道，何时使用由 AI 判断。
 
-**接口选择原则**（依设备能力而非设备类型）：
+**接口选择原则**（依设备能力而非设备类型，详见 §5）：
 
 - 有明确输出锚点 → `uart_expect`（可选 data 一步"发送+等待"）；
 - 无锚点（如 AT 模块）→ `uart_exchange` 的 idle 判定收尾；
