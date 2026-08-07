@@ -223,6 +223,7 @@ For large payloads (a few KB or more — firmware download / file transfer), **d
 - **Duration estimate**: 8N1 formula `time ≈ sent_bytes × 10 / baudrate + chunks × gap_ms`; 1 MiB @ 115200 ≈ 87 s — estimate first and warn the user about the expected wait
 - **`io_lock` is held during the send**: `uart_configure` / `uart_close` queue until it finishes; `uart_available` is unaffected and reports `send` progress (`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`)
 - **Abort**: `uart_send_cancel` (checkpoint exit, at most one extra chunk), `uart_close` (interrupts the send, then closes), or a client `notifications/cancelled`; on abort it returns `reason="cancelled"` plus sent stats so the model can reconcile and decide whether to resend
+- **Device-error awareness**: if the reader thread detects a fatal error (e.g. the serial device was physically unplugged), the send aborts at the next checkpoint with `reason="device_error"` plus `device_error` details — the write side may still "fake-success" (bytes enter the driver buffer while the device is gone), so trust this field and reconcile with the peer
 - **Partial failure**: write / read errors return an error that includes bytes/chunks already sent
 
 **Real-board notes** (tested on an actual Linux board):

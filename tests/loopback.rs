@@ -151,6 +151,11 @@ async fn loopback_send_file_all() {
     assert_eq!(v["raw_bytes"], json!(data.len() as u64));
     assert_eq!(v["sent_bytes"], json!(data.len() as u64));
     assert_eq!(v["chunks"], json!(64));
+    assert_eq!(
+        v["device_error"],
+        json!(null),
+        "正常回环不应有设备错误: {v:?}"
+    );
 
     let hex_back = read_all_hex(&client, &port).await;
     let back = hex::decode(&hex_back).expect("hex 解码失败");

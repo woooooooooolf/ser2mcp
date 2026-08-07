@@ -223,6 +223,7 @@ uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}      // 二
 - **耗时估算**：8N1 公式 `耗时 ≈ 发送字节数 × 10 / 波特率 + 片数 × gap_ms`；1 MiB @ 115200 ≈ 87 秒，发送前先估算并提示用户预期等待
 - **发送期间 io_lock 独占**：`uart_configure` / `uart_close` 会排队到发送结束；`uart_available` 不受影响，可随时查 `send` 进度（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`）
 - **中止**：`uart_send_cancel`（检查点退出，最坏多写一片）、`uart_close`（先中断发送再关闭端口）、客户端取消通知（`notifications/cancelled`）均可；中止时返回 `reason="cancelled"` + 已发统计，模型据此与对端对账后决定是否重发
+- **设备异常感知**：若读线程检测到致命错误（串口物理断开/硬件故障），发送在下一个检查点中止并返回 `reason="device_error"` + `device_error` 详情——写侧可能仍"假成功"（数据进驱动缓冲但设备已不在），须以此为准并做对端对账
 - **中途失败**：写失败/文件读取失败返回错误，错误信息含已发送字节/片数
 
 **对端实测注意事项**（真实 Linux 板经验）：

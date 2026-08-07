@@ -118,6 +118,8 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 - 只承诺"把文件字节发出去"：不解析数据格式、不主动发 EOF（对端需要 EOF 时另用 uart_write 补 \x04）。
 - 发送期间 io_lock 独占：uart_configure/uart_close 会排队等待；uart_available 可随时查进度；
   uart_send_cancel 或 uart_close 可中止（close 会中断并关闭传输）。
+- 设备异常感知：若读线程检测到致命错误（串口被物理断开等），发送在下一个检查点中止并返回
+  reason="device_error" + device_error 详情（写侧可能仍"假成功"，须以此为准并做对端对账）。
 - 大文件耗时可能很长（1 MiB @115200 ≈ 87 秒），务必先估算再发，并提示用户预期等待时间。
 
 回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
@@ -726,6 +728,7 @@ impl Ser2Mcp {
                 "elapsed_ms": outcome.elapsed_ms,
                 "overflow_delta": outcome.overflow_delta,
                 "overflow_total": outcome.overflow_total,
+                "device_error": outcome.device_error,
                 "mode": mode.as_str(),
                 "chunk_size": chunk_size,
                 "gap_ms": gap_ms,

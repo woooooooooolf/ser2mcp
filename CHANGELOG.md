@@ -9,6 +9,7 @@
 - 新增 `uart_send_file`：本地文件分片限速流式发送到串口，服务器内部循环一次调用，替代模型逐块调 `uart_write`（省协议与 token 成本，适合固件下载/文件传输场景）。参数：`port` / `path`（服务器读取，校验存在/类型/可读）/ `mode`（`text` 默认原样按字节 / `base64` 编码后发，每 76 字符自动换行、文件末尾补 `\n`，适合对端 icanon 行缓冲 `cat > file`）/ `chunk_size`（默认 256，模型须依据对端 tty 缓冲与波特率选择，宁小勿大）/ `gap_ms`（默认 0，每片写完 flush 已天然限速）。透明原则：只发字节、不解析数据格式、不主动发 EOF（对端需要 EOF 时模型用 `uart_write` 补 `\x04`）。返回 `reason` / `raw_bytes` / `sent_bytes` / `chunks` / `elapsed_ms` / `overflow_delta` / `overflow_total`，可与对端 `wc -c` 对账
 - 新增 `uart_send_estimate`：无需打开串口，按 `path` / `mode` / `chunk_size` / `gap_ms` / `baudrate` 估算发送字节数与耗时（8N1：每字节 10 bit），返回 `est_sent_bytes` / `est_chunks` / `est_time_ms` / `formula`，供模型先估算再发送（典型流程：估算 → 发送 → 对账）
 - 新增 `uart_send_cancel`：中止进行中的 `uart_send_file`（无传输时为 no-op），返回调用前的发送状态快照
+- 设备异常感知：`uart_send_file` 的每片检查点新增读线程致命错误检测（`read_error`，如串口物理断开）——中止并返回 `reason="device_error"` + `device_error` 详情，避免"写侧假成功"造成的发送完成假象；正常返回时 `device_error` 为 `null`
 - `uart_send_file` 支持三级取消/中断：`uart_send_cancel`（检查点退出，最坏多写一片）、`uart_close`（先取消并等待发送循环退出再关闭端口）、客户端 `notifications/cancelled` 通知（请求级 `CancellationToken` 注入，检查点与片间等待均可响应）
 - 发送期间 `uart_available` 返回 `send` 进度字段（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`），可随时查询
 

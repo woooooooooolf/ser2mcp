@@ -320,7 +320,9 @@ impl SendState {
 /// `uart_send_file` 的返回统计。
 #[derive(Debug, serde::Serialize)]
 pub struct SendFileOutcome {
-    /// 结束原因：completed（全部发完）/ cancelled（被 `uart_send_cancel` 或 `uart_close` 中止）。
+    /// 结束原因：completed（全部发完）/ cancelled（被 `uart_send_cancel`、
+    /// `uart_close` 或客户端取消通知中止）/ device_error（读线程致命错误，
+    /// 如串口设备物理断开）。
     pub reason: String,
     /// 原始文件字节数（base64 模式下为编码前字节数）。
     pub raw_bytes: u64,
@@ -334,6 +336,8 @@ pub struct SendFileOutcome {
     pub overflow_delta: u64,
     /// 累计溢出字节数。
     pub overflow_total: u64,
+    /// 读线程致命错误（`reason="device_error"` 时非空；正常为 `None`）。
+    pub device_error: Option<String>,
 }
 
 /// 活动串口连接（仅存在于 `SerialManager.inner` 的 Some 分支中）。
@@ -571,7 +575,8 @@ impl SerialManager {
         send.begin(total_bytes);
         let mut sent_bytes = 0u64;
         let mut chunks_done = 0u64;
-        let mut cancelled = false;
+        let mut reason = "completed";
+        let mut device_error: Option<String> = None;
         let mut chunks = chunks;
         loop {
             let chunk = match chunks.next() {
@@ -585,12 +590,22 @@ impl SerialManager {
                 }
             };
             // 检查点：取消标志（uart_send_cancel / uart_close）、客户端取消令牌
-            // （notifications/cancelled），或端口已被关闭。
-            if send.is_cancelled()
-                || ct.is_some_and(|c| c.is_cancelled())
-                || !self.ports.lock().unwrap().contains_key(port_name)
-            {
-                cancelled = true;
+            // （notifications/cancelled）、端口已被关闭，或读线程致命错误
+            // （设备物理断开/硬件故障——写侧可能仍假成功，据此中止避免"发完假象"）。
+            let (port_gone, reader_fault) = {
+                let ports = self.ports.lock().unwrap();
+                match ports.get(port_name) {
+                    None => (true, None),
+                    Some(ap) => (false, ap.read_error.lock().unwrap().clone()),
+                }
+            };
+            if send.is_cancelled() || ct.is_some_and(|c| c.is_cancelled()) || port_gone {
+                reason = "cancelled";
+                break;
+            }
+            if let Some(e) = reader_fault {
+                reason = "device_error";
+                device_error = Some(e);
                 break;
             }
             match write_locked(&port, &chunk) {
@@ -611,7 +626,7 @@ impl SerialManager {
                 if let Some(ct) = ct {
                     // 片间间隔期间也要响应取消（gap 可能较大）。
                     tokio::select! {
-                        _ = ct.cancelled() => { cancelled = true; break; }
+                        _ = ct.cancelled() => { reason = "cancelled"; break; }
                         _ = sleep => {}
                     }
                 } else {
@@ -619,7 +634,6 @@ impl SerialManager {
                 }
             }
         }
-        let reason = if cancelled { "cancelled" } else { "completed" };
         send.finish(reason, sent_bytes, chunks_done);
         let overflow_total = *last_overflow.lock().unwrap();
         Ok(SendFileOutcome {
@@ -630,6 +644,7 @@ impl SerialManager {
             elapsed_ms: started.elapsed().as_millis() as u64,
             overflow_delta: overflow_total.saturating_sub(overflow_before),
             overflow_total,
+            device_error,
         })
     }
 
