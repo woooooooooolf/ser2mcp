@@ -172,7 +172,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 - 编码：`hex`（默认，二进制安全）/ `text`（UTF-8）/ `text-escaped`（仅返回侧，控制字节转义为 `\xNN`）；终端命令务必 `newline="crlf"` 带行尾，否则命令不执行且残留行缓冲会与下一条命令拼合
 - 读取：`uart_read` / `uart_exchange` 在空闲判定（`idle_ms` 默认 300ms，应大于设备响应间隙）/ 达到上限（`max_bytes` 默认 64 KiB）/ 总超时（`timeout_ms` 默认 5000ms）之一满足时返回；`overflow_delta > 0` 表示缓冲溢出、数据有缺口
-- 完成判定：用 `uart_expect` 等输出锚点（如 `"# "`、`"Zynq>"`），命中即返回（毫秒级），不要 sleep 盲等或加大 timeout 干等
+- 完成判定：用 `uart_expect` 等输出锚点（如 `"# "`、`"Zynq>"`），命中即返回（毫秒级），不要 sleep 盲等或加大 timeout 干等；提示符因设备而异，不可用（echo 关闭/无提示符设备）时改用命令特有结束标记。长命令（wget/tar 解包等）的 `uart_expect` 与 idle 无关，其 `timeout_ms` 只是兜底上限（上限 5 分钟、命中即提前返回），可放大到覆盖整个命令时长
 - 大文件：`uart_send_estimate` → `uart_send_file` 一次调用（勿逐块 `uart_write`），完成后与对端 `wc -c` / `md5sum` 对账
 
 **常用示例**：
@@ -181,6 +181,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  # 终端命令
 uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                                            # AT 指令
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # 二进制帧
+uart_expect    {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}  # 发送+等提示符收尾一步完成
 uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # 等待提示符
 uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}           # 命中即按键
 ```

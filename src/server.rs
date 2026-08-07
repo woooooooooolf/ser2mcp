@@ -87,8 +87,15 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 - 一次只发一个短命令，发送后立即判断执行是否完成，不要用 sleep 盲等；
 - 完成判定优先用输出锚点：uart_expect 等待提示符/关键字（如 shell 的 "# "、"$ "
   或设备状态字符串），锚点出现即完成，再发下一条；需要"完成即触发"用 uart_expect_send；
+  提示符因设备而异、无通用提示符；提示符不可用（echo 关闭/无提示符设备）时改用命令特有结束标记。
 - 仅当设备没有明确锚点（如 AT 命令）时才用 uart_exchange 的 idle 判定收尾；
-- 慢操作（需数秒）不要靠加大 timeout_ms 干等——用 uart_expect 等锚点，命中即返回（毫秒级）。
+- 长命令（wget/tar 解包等，存在中间静默期）：uart_expect 的语义是"等 pattern 或超时"、与 idle 无关，
+  timeout_ms 只是兜底上限（上限 5 分钟，命中即提前返回、放大无成本）——无中间锚点的长命令
+  将 timeout_ms 放大到覆盖整个命令时长即可，不要用 uart_exchange 的 idle 判定干等。
+- 可选对齐（tty 处于 icanon 时）：可发 \x15（Ctrl+U）清板端行缓冲残留、\x03（Ctrl+C）中断当前命令，
+  作为每条命令前的对齐步骤；uart_clear 只清宿主上行缓冲，覆盖不到板端残留。
+- 设备环境未知时，先确认收尾依据（提示符/结束标记）是否可用再选接口；ser2mcp 仅提供字节透传与
+  等待/读取原语，调试动作由调用方自行判断。
 
 内容匹配语义（uart_expect / uart_expect_send）：
 - uart_expect 等待串口输出中出现指定 pattern（如 "Zynq>"、"Hit any key" 等提示符/关键字，
