@@ -240,6 +240,9 @@ tests/
 └── loopback.rs  # real-hardware loopback tests (#[ignore]; SER2MCP_LOOPBACK_PORT selects the port)
 scripts/
 └── mcp_cli.py   # lightweight MCP stdio CLI client (batch calls from a JSON action sequence)
+skills/
+├── ser2mcp-usage/         # AI usage SKILL: tool reference / encoding / read semantics / troubleshooting
+└── ser2mcp-file-transfer/ # streaming file-send SKILL: estimate / send / EOF / reconcile / peer-tty notes
 examples/
 ├── loopback.rs      # loopback self-test tool
 └── latency_probe.rs # latency probe (bench/benchw, real-hardware load test)

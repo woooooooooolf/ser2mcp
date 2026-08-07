@@ -240,6 +240,9 @@ tests/
 └── loopback.rs  # 真实硬件回环测试（#[ignore]，SER2MCP_LOOPBACK_PORT 指定端口）
 scripts/
 └── mcp_cli.py   # 轻量 MCP stdio 命令行客户端（动作序列批量调用）
+skills/
+├── ser2mcp-usage/         # AI 使用指南 SKILL：工具速查/编码/读取语义/故障排查
+└── ser2mcp-file-transfer/ # 文件流式发送 SKILL：估算/发送/EOF/对账/对端 tty 注意事项
 examples/
 ├── loopback.rs      # 回环自测工具
 └── latency_probe.rs # 延迟探针（bench/benchw，真实硬件压测）
