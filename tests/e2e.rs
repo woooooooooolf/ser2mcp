@@ -54,7 +54,7 @@ fn structured_error_of(r: &CallToolResult) -> Option<String> {
 async fn e2e_tool_registration_and_errors() {
     let client = connect().await.expect("连接 ser2mcp 失败");
 
-    // 1. 工具注册：应包含全部 11 个工具
+    // 1. 工具注册：应包含全部 14 个工具
     let tools = client
         .list_tools(Default::default())
         .await
@@ -74,6 +74,9 @@ async fn e2e_tool_registration_and_errors() {
             "uart_list_ports".to_string(),
             "uart_open".to_string(),
             "uart_read".to_string(),
+            "uart_send_cancel".to_string(),
+            "uart_send_estimate".to_string(),
+            "uart_send_file".to_string(),
             "uart_write".to_string(),
         ],
         "工具清单不完整"
@@ -343,6 +346,148 @@ async fn e2e_text_escaped_and_newline_params() {
     )
     .await;
     assert!(r.is_err(), "非法 read_mode 应触发 invalid_params");
+
+    client.cancel().await.expect("关闭客户端失败");
+}
+
+/// 创建临时文件（写入内容），返回 (路径, 清理句柄)；Drop 时删除。
+struct TempFile {
+    path: std::path::PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str, content: &[u8]) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "ser2mcp-e2e-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, content).expect("写临时文件失败");
+        Self { path }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// uart_send_estimate / uart_send_file / uart_send_cancel 的参数校验与错误路径
+/// （不依赖真实串口硬件）。
+#[tokio::test]
+async fn e2e_send_file_params_and_errors() {
+    let client = connect().await.expect("连接 ser2mcp 失败");
+    let tmp = TempFile::new("send", b"hello ser2mcp send file 0123456789");
+
+    // 1. uart_send_estimate 正常路径：返回估算字段
+    let r = call(
+        &client,
+        "uart_send_estimate",
+        json!({"path": tmp.path, "mode": "text", "chunk_size": 64, "baudrate": 115200}),
+    )
+    .await
+    .expect("estimate 调用失败");
+    assert!(!r.is_error.unwrap_or(false), "estimate 应成功: {r:?}");
+    let v = r.structured_content.expect("应有结构化返回");
+    let file_size = tmp.path.metadata().unwrap().len();
+    assert_eq!(v["file_size"], json!(file_size));
+    assert_eq!(v["est_sent_bytes"], json!(file_size));
+    assert_eq!(v["mode"], json!("text"));
+    assert_eq!(v["est_chunks"], json!(file_size.div_ceil(64)));
+    assert!(v["est_time_ms"].as_u64().unwrap() > 0);
+
+    // 2. uart_send_estimate base64 模式：sent 字节应膨胀（含换行）
+    let r = call(
+        &client,
+        "uart_send_estimate",
+        json!({"path": tmp.path, "mode": "base64", "chunk_size": 64}),
+    )
+    .await
+    .expect("estimate 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["mode"], json!("base64"));
+    let sent = v["est_sent_bytes"].as_u64().unwrap();
+    assert!(sent > file_size, "base64 应膨胀: {sent} vs {file_size}");
+
+    // 3. uart_send_estimate 文件不存在 → 协议级 invalid_params
+    let r = call(
+        &client,
+        "uart_send_estimate",
+        json!({"path": "Z:\\ser2mcp\\definitely\\missing\\file.bin"}),
+    )
+    .await;
+    assert!(r.is_err(), "文件不存在应触发 invalid_params: {r:?}");
+
+    // 4. uart_send_estimate path 是目录 → 协议级错误
+    let r = call(&client, "uart_send_estimate", json!({"path": "."})).await;
+    assert!(r.is_err(), "目录应触发 invalid_params: {r:?}");
+
+    // 5. uart_send_estimate chunk_size=0 / 非法 mode / baudrate=0 → 协议级错误
+    for args in [
+        json!({"path": tmp.path, "chunk_size": 0}),
+        json!({"path": tmp.path, "mode": "hex"}),
+        json!({"path": tmp.path, "baudrate": 0}),
+    ] {
+        let r = call(&client, "uart_send_estimate", args).await;
+        assert!(r.is_err(), "非法参数应触发 invalid_params: {r:?}");
+    }
+
+    // 6. uart_send_file 未打开端口 + 合法文件 → 工具级错误（"未打开"）
+    let r = call(
+        &client,
+        "uart_send_file",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path}),
+    )
+    .await
+    .expect("send_file 调用失败");
+    assert!(r.is_error.unwrap_or(false), "未打开端口应报错: {r:?}");
+    assert!(
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开")
+    );
+
+    // 7. uart_send_file 文件不存在 / 目录 / chunk_size=0 / gap_ms 超上限 / 非法 mode
+    //    → 协议级 invalid_params（文件校验先于端口校验）
+    for (args, why) in [
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": "Z:\\ser2mcp\\missing.bin"}),
+            "文件不存在",
+        ),
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": "."}),
+            "目录",
+        ),
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "chunk_size": 0}),
+            "chunk_size=0",
+        ),
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "gap_ms": 999999999}),
+            "gap_ms 超上限",
+        ),
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "mode": "hex"}),
+            "非法 mode",
+        ),
+    ] {
+        let r = call(&client, "uart_send_file", args).await;
+        assert!(r.is_err(), "{why} 应触发 invalid_params: {r:?}");
+    }
+
+    // 8. uart_send_cancel 未打开端口 → 工具级错误
+    let r = call(
+        &client,
+        "uart_send_cancel",
+        json!({"port": "COM_SER2MCP_NONEXISTENT"}),
+    )
+    .await
+    .expect("send_cancel 调用失败");
+    assert!(r.is_error.unwrap_or(false));
 
     client.cancel().await.expect("关闭客户端失败");
 }

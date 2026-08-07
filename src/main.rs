@@ -7,6 +7,7 @@ mod hex;
 mod manager;
 mod reader;
 mod ring;
+mod sendfile;
 mod server;
 
 use anyhow::Result;

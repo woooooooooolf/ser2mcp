@@ -30,8 +30,9 @@
 //! - [`hex`]    —— hex 编解码
 //! - [`ring`]   —— 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒 + pattern 查找）
 //! - [`reader`] —— 事件驱动/非阻塞读线程（平台适配层）
-//! - [`manager`]—— 串口管理器（打开/重配置/读线程/写/拉取/期待匹配）
-//! - [`server`] —— MCP 工具层（11 个 `uart_*` 工具 + `ServerHandler`）
+//! - [`sendfile`]—— 文件流式发送（分块 + base64 编码 + 耗时估算）
+//! - [`manager`]—— 串口管理器（打开/重配置/读线程/写/拉取/期待匹配/文件发送）
+//! - [`server`] —— MCP 工具层（14 个 `uart_*` 工具 + `ServerHandler`）
 //!
 //! ## 快速开始
 //!
@@ -46,4 +47,5 @@ pub mod hex;
 pub mod manager;
 pub mod reader;
 pub mod ring;
+pub mod sendfile;
 pub mod server;

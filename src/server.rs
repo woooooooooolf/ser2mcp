@@ -1,6 +1,6 @@
 //! MCP 工具层：工具注册 + ServerHandler 实现。
 //!
-//! 工具面（11 个）：
+//! 工具面（14 个）：
 //! - `uart_list_ports`   枚举本机可用串口
 //! - `uart_open`         打开串口（全量串口参数 + 内部参数：缓冲区大小等）
 //! - `uart_configure`    运行时重配置（仅更新传入项）
@@ -9,9 +9,12 @@
 //! - `uart_exchange`     写 + 读（对 LLM 最常用的一步操作）
 //! - `uart_expect`       等待匹配输出（可选"发送+等待"；内容匹配语义）
 //! - `uart_expect_send`  匹配后立即发送（等待→命中→发送一步原子完成）
-//! - `uart_available`    状态快照（含缓冲统计与读线程错误）
+//! - `uart_available`    状态快照（含缓冲统计、读线程错误与发送进度）
 //! - `uart_clear`        清空未读缓冲
-//! - `uart_close`        关闭串口
+//! - `uart_close`        关闭串口（进行中的文件发送会被中断）
+//! - `uart_send_estimate` 文件发送耗时/字节数估算（无需打开串口）
+//! - `uart_send_file`    文件流式发送（分片限速，服务器内部循环一次调用）
+//! - `uart_send_cancel`  中止进行中的文件发送
 //!
 //! 多端口与透传：支持同时打开多个串口，端口名（如 `COM3` / `/dev/ttyUSB0`）即句柄，
 //! 除 `uart_list_ports` 外每个工具都要求 `port` 参数；字节流原样透传，不做解析/过滤；
@@ -30,12 +33,14 @@ use rmcp::{
     tool_handler, tool_router,
 };
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::hex;
 use crate::manager::{
     self, DEFAULT_BUFFER_SIZE, DEFAULT_IDLE_MS, DEFAULT_MAX_BYTES, DEFAULT_READ_TIMEOUT_MS,
     DEFAULT_TIMEOUT_MS, PortConfig, ReadReason, SerialManager,
 };
+use crate::sendfile;
 
 /// 对 AI 助手的使用指引（随 initialize 返回）。
 const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不过滤字节流内容；uart_expect 系列仅在缓冲中做条件查找，不修改数据）。
@@ -100,6 +105,20 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   的返回值（属未读数据，正常语义）；需要精确对齐时先 uart_clear 或先 uart_read 消费残留。
 - 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
   返回值中的 overflow_delta > 0 可帮助识别该情况。
+
+文件发送（uart_send_estimate → uart_send_file，替代大文件逐块 uart_write，省协议与 token）:
+- uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}：先估算发送字节数与耗时
+  （8N1 公式：耗时 ≈ 发送字节数 × 10 / 波特率 + 片数 × gap_ms），无需打开串口。
+- uart_send_file {port, path, mode?, chunk_size?, gap_ms?}：服务器分片限速发送，一次调用；
+  返回 raw_bytes/sent_bytes/chunks/elapsed_ms/overflow 统计，可与对端 wc -c 对账。
+- chunk_size 是模型的责任：先查对端 tty 缓冲限制（如板端 stty -a 看 icanon/行缓冲）与波特率，
+  选 chunk_size ≤ 缓冲上限，宁小勿大——无流控下超限即丢字节且不可恢复；默认 256 字节。
+- mode="text"（默认）原样按字节发；mode="base64" 服务器编码后发（每 76 字符自动换行、
+  末尾补换行），适合 icanon 行缓冲对端 cat > file；base64 实际发送 ≈ 1.34 倍 + 换行。
+- 只承诺"把文件字节发出去"：不解析数据格式、不主动发 EOF（对端需要 EOF 时另用 uart_write 补 \x04）。
+- 发送期间 io_lock 独占：uart_configure/uart_close 会排队等待；uart_available 可随时查进度；
+  uart_send_cancel 或 uart_close 可中止（close 会中断并关闭传输）。
+- 大文件耗时可能很长（1 MiB @115200 ≈ 87 秒），务必先估算再发，并提示用户预期等待时间。
 
 回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
 
@@ -266,12 +285,63 @@ pub struct ExpectSendArgs {
     pub read_mode: Option<String>,
 }
 
+/// 串口工具参数：uart_send_file（文件流式发送）。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendFileArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+    /// 本地文件路径（服务器读取；须存在、是普通文件、可读）。
+    pub path: String,
+    /// 编码：text（默认，原样按字节发）/ base64（服务器编码后发，每 76 字符自动换行）。
+    pub mode: Option<String>,
+    /// 分片大小（原始字节），默认 256。模型须依据对端 tty 缓冲限制与波特率选择，宁小勿大。
+    pub chunk_size: Option<usize>,
+    /// 片间间隔（毫秒），默认 0（每片写完 flush 已天然限速到波特率上限）。
+    pub gap_ms: Option<u64>,
+}
+
+/// 串口工具参数：uart_send_estimate（发送耗时估算，无需打开串口）。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendEstimateArgs {
+    /// 本地文件路径（只读元数据，不发送）。
+    pub path: String,
+    /// 编码：text（默认）/ base64。
+    pub mode: Option<String>,
+    /// 分片大小（原始字节），默认 256。
+    pub chunk_size: Option<usize>,
+    /// 片间间隔（毫秒），默认 0。
+    pub gap_ms: Option<u64>,
+    /// 波特率，默认 115200。
+    pub baudrate: Option<u32>,
+}
+
+/// 串口工具参数：uart_send_cancel。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendCancelArgs {
+    /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
+    pub port: String,
+}
+
 fn require_port(port: &str) -> Result<(), McpError> {
     if port.trim().is_empty() {
         Err(McpError::invalid_params("port 不能为空", None))
     } else {
         Ok(())
     }
+}
+
+/// 校验发送文件：path 非空、存在、是普通文件、可读；返回文件字节数。
+fn send_file_meta(path: &str) -> Result<u64, String> {
+    if path.trim().is_empty() {
+        return Err("path 不能为空".into());
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("无法访问文件 {path}: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("{path} 是目录，不是普通文件"));
+    }
+    // 打开验证可读（权限问题在这里暴露）。
+    std::fs::File::open(path).map_err(|e| format!("打开文件 {path} 失败: {e}"))?;
+    Ok(meta.len())
 }
 
 /// 校验发送编码模式：hex 或 text（text-escaped 仅用于返回侧）。
@@ -560,6 +630,129 @@ impl Ser2Mcp {
         }
     }
 
+    /// 估算 uart_send_file 的发送字节数与耗时（8N1：每字节 10 bit，未计片间
+    /// flush 开销，实际耗时通常略高于估算值）。无需打开串口，只读文件元数据。
+    #[tool(
+        description = "估算 uart_send_file 的传输字节数与耗时（path 必填；无需打开串口，baudrate 默认 115200）。典型流程：先 uart_send_estimate，再 uart_send_file。"
+    )]
+    async fn uart_send_estimate(
+        &self,
+        Parameters(args): Parameters<SendEstimateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mode = match sendfile::SendMode::parse(args.mode.as_deref().unwrap_or("text")) {
+            Ok(m) => m,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        let chunk_size = match args.chunk_size {
+            None => sendfile::DEFAULT_CHUNK_SIZE,
+            Some(0) => return Err(McpError::invalid_params("chunk_size 必须 ≥ 1", None)),
+            Some(v) => v,
+        };
+        let gap_ms = args.gap_ms.unwrap_or(0);
+        if gap_ms > manager::MAX_SEND_GAP_MS {
+            return Err(McpError::invalid_params(
+                format!(
+                    "gap_ms 超出上限 {}ms（发送期间其它工具调用会排队）",
+                    manager::MAX_SEND_GAP_MS
+                ),
+                None,
+            ));
+        }
+        let baudrate = args.baudrate.unwrap_or(manager::DEFAULT_BAUDRATE);
+        if baudrate == 0 {
+            return Err(McpError::invalid_params("baudrate 必须 ≥ 1", None));
+        }
+        let size = match send_file_meta(&args.path) {
+            Ok(s) => s,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        Ok(CallToolResult::structured(json!(sendfile::estimate(
+            mode, size, chunk_size, gap_ms, baudrate
+        ))))
+    }
+
+    /// 把本地文件分片限速发送到串口：服务器内部循环一次调用，替代模型逐块
+    /// 调 uart_write（省协议与 token 成本）。只承诺"把文件字节发出去"：不解析
+    /// 数据格式、不主动发 EOF（对端需要 EOF 时模型另用 uart_write 补 \x04）。
+    /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
+    /// / 客户端取消通知（notifications/cancelled）均可中止。
+    #[tool(
+        description = "文件流式发送（port、path 必填）：分片限速发送本地文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（编码后发，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256（模型须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0。只发字节、不解析、不主动发 EOF。返回 raw_bytes/sent_bytes/chunks/elapsed_ms/overflow 统计，可与对端 wc -c 对账。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+    )]
+    async fn uart_send_file(
+        &self,
+        Parameters(args): Parameters<SendFileArgs>,
+        ct: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        let mode = match sendfile::SendMode::parse(args.mode.as_deref().unwrap_or("text")) {
+            Ok(m) => m,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        let chunk_size = match args.chunk_size {
+            None => sendfile::DEFAULT_CHUNK_SIZE,
+            Some(0) => return Err(McpError::invalid_params("chunk_size 必须 ≥ 1", None)),
+            Some(v) => v,
+        };
+        let gap_ms = args.gap_ms.unwrap_or(0);
+        if gap_ms > manager::MAX_SEND_GAP_MS {
+            return Err(McpError::invalid_params(
+                format!(
+                    "gap_ms 超出上限 {}ms（发送期间其它工具调用会排队）",
+                    manager::MAX_SEND_GAP_MS
+                ),
+                None,
+            ));
+        }
+        let total = match send_file_meta(&args.path) {
+            Ok(s) => s,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
+        let file = match std::fs::File::open(&args.path) {
+            Ok(f) => f,
+            Err(e) => return Err(McpError::invalid_params(format!("打开文件失败: {e}"), None)),
+        };
+        let chunks = sendfile::ChunkIter::new(file, mode, chunk_size);
+        match self
+            .manager
+            .send_file(&args.port, chunks, total, gap_ms, Some(&ct))
+            .await
+        {
+            Ok(outcome) => Ok(CallToolResult::structured(json!({
+                "reason": outcome.reason,
+                "raw_bytes": outcome.raw_bytes,
+                "sent_bytes": outcome.sent_bytes,
+                "chunks": outcome.chunks,
+                "elapsed_ms": outcome.elapsed_ms,
+                "overflow_delta": outcome.overflow_delta,
+                "overflow_total": outcome.overflow_total,
+                "mode": mode.as_str(),
+                "chunk_size": chunk_size,
+                "gap_ms": gap_ms,
+            }))),
+            Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
+        }
+    }
+
+    /// 中止当前 uart_send_file 传输（无传输时为 no-op）。发送循环在下一个
+    /// 检查点退出，最坏多写一片；返回调用前的发送状态快照供判断。
+    #[tool(
+        description = "中止当前 uart_send_file 文件发送（port 必填；无传输时为 no-op）。返回调用前的发送状态快照。"
+    )]
+    async fn uart_send_cancel(
+        &self,
+        Parameters(args): Parameters<SendCancelArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        require_port(&args.port)?;
+        match self.manager.cancel_send(&args.port) {
+            Ok(snap) => Ok(CallToolResult::structured(json!({
+                "cancelled": snap.active,
+                "send": snap,
+            }))),
+            Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
+        }
+    }
+
     /// 拉取串口上行缓冲：空闲判定（收到最后一个字节后持续 idle_ms 无新数据
     /// 且驱动侧无残留字节）、未读字节数达 max_bytes、或总等待超时 timeout_ms
     /// 三者之一满足时返回全部未读数据。
@@ -783,9 +976,10 @@ impl Ser2Mcp {
         }
     }
 
-    /// 查询串口状态：是否打开、当前配置、缓冲未读字节数、累计溢出字节数、读线程错误等。
+    /// 查询串口状态：是否打开、当前配置、缓冲未读字节数、累计溢出字节数、
+    /// 读线程错误、文件发送进度（send 字段）等。
     #[tool(
-        description = "查询指定串口的运行状态与缓冲统计（port 必填；open、配置、buffered_bytes、overflow_total、read_error）。"
+        description = "查询指定串口的运行状态与缓冲统计（port 必填；open、配置、buffered_bytes、overflow_total、read_error、send 发送进度）。"
     )]
     async fn uart_available(
         &self,

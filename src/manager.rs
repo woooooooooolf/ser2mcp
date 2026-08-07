@@ -10,12 +10,13 @@
 //! - 所有写/读/配置操作经 `io_lock` 串行化，保证 AI 回合制调用下语义清晰。
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+use tokio_util::sync::CancellationToken;
 
 use crate::ring::RingBuf;
 
@@ -43,6 +44,11 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 /// expect 持有 `io_lock` 直到超时返回，期间其它工具调用全部排队；
 /// 上限防止 LLM 传入任意大值导致工具面长时间不可用。
 pub const MAX_EXPECT_TIMEOUT_MS: u64 = 300_000;
+/// `uart_send_file` 的 `gap_ms` 上限（毫秒，1 分钟）。
+///
+/// 发送期间持有 `io_lock`，过大的片间间隔会让其它工具调用长时间排队；
+/// 上限防止 LLM 传入任意大值导致工具面不可用。
+pub const MAX_SEND_GAP_MS: u64 = 60_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// 规范化后的串口运行时配置。
@@ -222,6 +228,112 @@ pub struct AvailableInfo {
     pub overflow_total: u64,
     /// 读线程的致命错误（端口被拔等），正常时为 `None`。
     pub read_error: Option<String>,
+    /// 文件发送状态（`uart_send_file` 进行中/最近一次结果）。
+    pub send: SendProgress,
+}
+
+/// 文件发送的进度快照（`uart_available` 的 `send` 字段）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SendProgress {
+    /// 是否正在发送文件。
+    pub active: bool,
+    /// 最近一次发送的结束原因：completed / cancelled / error；无发送记录时为 `None`。
+    pub last_reason: Option<String>,
+    /// 已写入串口的字节数（base64 模式含换行）。
+    pub sent_bytes: u64,
+    /// 本次发送的原始文件字节数（base64 模式为编码前字节数）。
+    pub total_bytes: u64,
+    /// 已完成的发送片数。
+    pub chunks: u64,
+}
+
+/// 发送会话的共享状态：进度快照 + 取消标志 + 完成通知（供 `uart_close` 中断）。
+/// 每个活动端口一个；随端口生命周期存在，`uart_open` 时新建。
+struct SendState {
+    progress: Mutex<SendProgress>,
+    cancel: AtomicBool,
+    done: tokio::sync::Notify,
+}
+
+impl SendState {
+    fn new() -> Self {
+        Self {
+            progress: Mutex::new(SendProgress::default()),
+            cancel: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn snapshot(&self) -> SendProgress {
+        self.progress.lock().unwrap().clone()
+    }
+
+    fn is_active(&self) -> bool {
+        self.progress.lock().unwrap().active
+    }
+
+    /// 请求中止当前发送（发送循环在下一个检查点退出）。幂等。
+    fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// 发送循环进入：重置取消标志（上一会话的 cancel 不影响新会话）并标记进行中。
+    fn begin(&self, total_bytes: u64) {
+        self.cancel.store(false, Ordering::SeqCst);
+        let mut p = self.progress.lock().unwrap();
+        p.active = true;
+        p.last_reason = None;
+        p.sent_bytes = 0;
+        p.total_bytes = total_bytes;
+        p.chunks = 0;
+    }
+
+    /// 发送循环退出：记录结束原因并唤醒等待者（`uart_close` 中断路径）。
+    fn finish(&self, reason: &str, sent_bytes: u64, chunks: u64) {
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.active = false;
+            p.last_reason = Some(reason.to_string());
+            p.sent_bytes = sent_bytes;
+            p.chunks = chunks;
+        }
+        self.done.notify_one();
+    }
+
+    fn update(&self, sent_bytes: u64, chunks: u64) {
+        let mut p = self.progress.lock().unwrap();
+        p.sent_bytes = sent_bytes;
+        p.chunks = chunks;
+    }
+
+    /// 等待当前发送退出。仅应在已 `cancel()` 且 `is_active()` 为 true 时调用；
+    /// tokio Notify 会保留已发出的通知（permit），不会错过退出瞬间。
+    async fn wait_done(&self) {
+        self.done.notified().await;
+    }
+}
+
+/// `uart_send_file` 的返回统计。
+#[derive(Debug, serde::Serialize)]
+pub struct SendFileOutcome {
+    /// 结束原因：completed（全部发完）/ cancelled（被 `uart_send_cancel` 或 `uart_close` 中止）。
+    pub reason: String,
+    /// 原始文件字节数（base64 模式下为编码前字节数）。
+    pub raw_bytes: u64,
+    /// 实际写入串口的字节数（base64 模式含换行）。
+    pub sent_bytes: u64,
+    /// 已完成的发送片数。
+    pub chunks: u64,
+    /// 总耗时（毫秒）。
+    pub elapsed_ms: u64,
+    /// 发送期间上行缓冲溢出增量（对账诊断用；发送文件场景通常为 0）。
+    pub overflow_delta: u64,
+    /// 累计溢出字节数。
+    pub overflow_total: u64,
 }
 
 /// 活动串口连接（仅存在于 `SerialManager.inner` 的 Some 分支中）。
@@ -236,6 +348,8 @@ struct ActivePort {
     read_error: Arc<Mutex<Option<String>>>,
     /// 上次读取时的累计溢出计数（用于计算增量），随端口生命周期存在。
     last_overflow: Arc<Mutex<u64>>,
+    /// 文件发送会话状态（进度/取消/完成通知）。
+    send: Arc<SendState>,
 }
 
 /// 串口管理器。
@@ -358,6 +472,7 @@ impl SerialManager {
                 reader: Some(reader),
                 read_error,
                 last_overflow: Arc::new(Mutex::new(0)),
+                send: Arc::new(SendState::new()),
             },
         );
         Ok(())
@@ -424,6 +539,112 @@ impl SerialManager {
             .get(port_name)
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
         write_locked(&ap.port, data)
+    }
+
+    /// 流式发送文件内容（分片 + 可选片间间隔），全程持有 `io_lock`，期间其它
+    /// 写/配置/期待工具调用排队；`uart_available` 不受影响，可随时查询进度。
+    ///
+    /// `chunks` 为已编码（base64 含换行）的待发送分片迭代器；`total_bytes` 为
+    /// 原始文件字节数。每个检查点（每片写入前）检测取消标志（`uart_send_cancel`
+    /// / `uart_close` / 客户端取消令牌 `ct`）与端口是否仍打开：
+    /// 被中止时返回 `reason="cancelled"`（非错误），调用方可用 `sent_bytes`
+    /// 与对端对账后决定是否重发。分片读取失败（`Err`）时终止并返回错误，
+    /// 错误信息含已发送进度。
+    pub async fn send_file(
+        &self,
+        port_name: &str,
+        chunks: impl Iterator<Item = Result<Vec<u8>, String>>,
+        total_bytes: u64,
+        gap_ms: u64,
+        ct: Option<&CancellationToken>,
+    ) -> Result<SendFileOutcome, String> {
+        let _guard = self.io_lock.lock().await;
+        let (port, last_overflow, send) = {
+            let ports = self.ports.lock().unwrap();
+            let ap = ports
+                .get(port_name)
+                .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            (ap.port.clone(), ap.last_overflow.clone(), ap.send.clone())
+        };
+        let overflow_before = *last_overflow.lock().unwrap();
+        let started = Instant::now();
+        send.begin(total_bytes);
+        let mut sent_bytes = 0u64;
+        let mut chunks_done = 0u64;
+        let mut cancelled = false;
+        let mut chunks = chunks;
+        loop {
+            let chunk = match chunks.next() {
+                None => break,
+                Some(Ok(c)) => c,
+                Some(Err(e)) => {
+                    send.finish("error", sent_bytes, chunks_done);
+                    return Err(format!(
+                        "{e}（已发送 {sent_bytes} 字节 / {chunks_done} 片）"
+                    ));
+                }
+            };
+            // 检查点：取消标志（uart_send_cancel / uart_close）、客户端取消令牌
+            // （notifications/cancelled），或端口已被关闭。
+            if send.is_cancelled()
+                || ct.is_some_and(|c| c.is_cancelled())
+                || !self.ports.lock().unwrap().contains_key(port_name)
+            {
+                cancelled = true;
+                break;
+            }
+            match write_locked(&port, &chunk) {
+                Ok(n) => {
+                    sent_bytes += n as u64;
+                    chunks_done += 1;
+                    send.update(sent_bytes, chunks_done);
+                }
+                Err(e) => {
+                    send.finish("error", sent_bytes, chunks_done);
+                    return Err(format!(
+                        "写入失败: {e}（已发送 {sent_bytes} 字节 / {chunks_done} 片）"
+                    ));
+                }
+            }
+            if gap_ms > 0 {
+                let sleep = tokio::time::sleep(Duration::from_millis(gap_ms));
+                if let Some(ct) = ct {
+                    // 片间间隔期间也要响应取消（gap 可能较大）。
+                    tokio::select! {
+                        _ = ct.cancelled() => { cancelled = true; break; }
+                        _ = sleep => {}
+                    }
+                } else {
+                    sleep.await;
+                }
+            }
+        }
+        let reason = if cancelled { "cancelled" } else { "completed" };
+        send.finish(reason, sent_bytes, chunks_done);
+        let overflow_total = *last_overflow.lock().unwrap();
+        Ok(SendFileOutcome {
+            reason: reason.into(),
+            raw_bytes: total_bytes,
+            sent_bytes,
+            chunks: chunks_done,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            overflow_delta: overflow_total.saturating_sub(overflow_before),
+            overflow_total,
+        })
+    }
+
+    /// 请求中止当前 `uart_send_file` 传输（无传输时为 no-op）。
+    /// 返回调用前的进度快照，供调用方判断是否真的中止了传输。
+    pub fn cancel_send(&self, port_name: &str) -> Result<SendProgress, String> {
+        let ports = self.ports.lock().unwrap();
+        let ap = ports
+            .get(port_name)
+            .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+        let snap = ap.send.snapshot();
+        if snap.active {
+            ap.send.cancel();
+        }
+        Ok(snap)
     }
 
     /// 等待串口输出中出现 pattern（内容匹配，跨分片/wrap）；`data` 传入时先发送再等待。
@@ -624,6 +845,7 @@ impl SerialManager {
                 buffered_bytes: 0,
                 overflow_total: 0,
                 read_error: None,
+                send: SendProgress::default(),
             },
             Some(ap) => {
                 let (buffered, overflow_total) = ap.buffer.stats();
@@ -641,6 +863,7 @@ impl SerialManager {
                     buffered_bytes: buffered,
                     overflow_total,
                     read_error: ap.read_error.lock().unwrap().clone(),
+                    send: ap.send.snapshot(),
                 }
             }
         }
@@ -657,8 +880,26 @@ impl SerialManager {
         Ok(bytes)
     }
 
-    /// 关闭串口（异步：先停读线程并 join，再释放端口句柄）。
+    /// 关闭串口：先请求中止进行中的文件发送并等待其退出（最多 30s 兑底），
+    /// 再停止读线程并释放端口句柄。发送循环在下一个检查点退出，最坏多写一片。
     pub async fn close(&self, port_name: &str) -> Result<(), String> {
+        let send = {
+            let ports = self.ports.lock().unwrap();
+            ports.get(port_name).map(|ap| ap.send.clone())
+        };
+        if let Some(send) = send {
+            if send.is_active() {
+                send.cancel();
+                tokio::select! {
+                    _ = send.wait_done() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        return Err(format!(
+                            "端口 {port_name} 的文件发送未在 30s 内退出，关闭中止"
+                        ));
+                    }
+                }
+            }
+        }
         let ap = self
             .ports
             .lock()

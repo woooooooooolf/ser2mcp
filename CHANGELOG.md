@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- 新增 `uart_send_file`：本地文件分片限速流式发送到串口，服务器内部循环一次调用，替代模型逐块调 `uart_write`（省协议与 token 成本，适合固件下载/文件传输场景）。参数：`port` / `path`（服务器读取，校验存在/类型/可读）/ `mode`（`text` 默认原样按字节 / `base64` 编码后发，每 76 字符自动换行、文件末尾补 `\n`，适合对端 icanon 行缓冲 `cat > file`）/ `chunk_size`（默认 256，模型须依据对端 tty 缓冲与波特率选择，宁小勿大）/ `gap_ms`（默认 0，每片写完 flush 已天然限速）。透明原则：只发字节、不解析数据格式、不主动发 EOF（对端需要 EOF 时模型用 `uart_write` 补 `\x04`）。返回 `reason` / `raw_bytes` / `sent_bytes` / `chunks` / `elapsed_ms` / `overflow_delta` / `overflow_total`，可与对端 `wc -c` 对账
+- 新增 `uart_send_estimate`：无需打开串口，按 `path` / `mode` / `chunk_size` / `gap_ms` / `baudrate` 估算发送字节数与耗时（8N1：每字节 10 bit），返回 `est_sent_bytes` / `est_chunks` / `est_time_ms` / `formula`，供模型先估算再发送（典型流程：估算 → 发送 → 对账）
+- 新增 `uart_send_cancel`：中止进行中的 `uart_send_file`（无传输时为 no-op），返回调用前的发送状态快照
+- `uart_send_file` 支持三级取消/中断：`uart_send_cancel`（检查点退出，最坏多写一片）、`uart_close`（先取消并等待发送循环退出再关闭端口）、客户端 `notifications/cancelled` 通知（请求级 `CancellationToken` 注入，检查点与片间等待均可响应）
+- 发送期间 `uart_available` 返回 `send` 进度字段（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`），可随时查询
+
+### Changed
+
+- 工具面 11 → 14；`uart_close` 语义增强：进行中的文件发送会被中断（设置取消标志 → 等待发送循环退出（30s 兜底）→ 停止读线程并释放端口）
+- 依赖新增 `base64`（0.22）与 `tokio-util`（0.7，`CancellationToken`）
+
+### Docs
+
+- README（中英）与 `INSTRUCTIONS` 新增"文件发送"章节：`uart_send_estimate → uart_send_file` 典型流程、`chunk_size` 选择指南（先查对端 tty 缓冲限制如 `stty -a`、宁小勿大、无流控超限即丢字节）、base64 膨胀系数（≈1.34 倍 + 换行）、耗时估算公式、对账方法（`wc -c` / `md5sum`）、EOF 处理（`\x04` 由模型负责）、取消/中断语义、实测注意事项（对端 tty 的 `\r\n` 残留、IXON 流控、`stty raw` 收二进制）
+- 新增 `scripts/mcp_cli.py`：轻量 MCP stdio 命令行客户端（JSON 动作序列 → 逐条调用并输出结果），便于脚本化/板端实测
+
 ## [0.5.1] - 2026-08-06
 
 ### Added

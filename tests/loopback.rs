@@ -1,0 +1,432 @@
+//! 真实硬件回环测试（TX-RX 短接）：验证 `uart_send_file` 在 MCP 工具层的端到端行为。
+//!
+//! 需要硬件：一个 TX-RX 物理回环的串口（如 COM28）。
+//!
+//! ```bash
+//! SER2MCP_LOOPBACK_PORT=COM28 cargo test --test loopback -- --ignored --nocapture
+//! ```
+//!
+//! 覆盖（单测试函数顺序执行，避免多测试争用同一串口）：
+//! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
+//! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
+//! - `uart_send_cancel` 并发中止传输（reason=cancelled + 部分进度）
+//! - `uart_close` 并发中断传输并关闭端口
+//! - 原始 JSON-RPC `notifications/cancelled` 通知中止传输（客户端取消路径）
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rmcp::{
+    ClientHandler, RmcpError, ServiceExt,
+    model::{CallToolRequestParams, CallToolResponse, CallToolResult},
+    transport::TokioChildProcess,
+};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, ChildStdout, Command};
+
+use ser2mcp::hex;
+
+#[derive(Clone, Default)]
+struct TestClient;
+
+impl ClientHandler for TestClient {}
+
+async fn connect() -> Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>, RmcpError>
+{
+    let bin = env!("CARGO_BIN_EXE_ser2mcp");
+    let client = TestClient
+        .serve(
+            TokioChildProcess::new(Command::new(bin))
+                .map_err(RmcpError::transport_creation::<TokioChildProcess>)?,
+        )
+        .await?;
+    Ok(client)
+}
+
+async fn call(
+    client: &rmcp::Peer<rmcp::RoleClient>,
+    name: &str,
+    args: Value,
+) -> Result<CallToolResult, rmcp::service::ServiceError> {
+    match client
+        .call_tool_once(
+            CallToolRequestParams::new(name.to_string())
+                .with_arguments(args.as_object().expect("args 必须是对象").clone()),
+        )
+        .await?
+    {
+        CallToolResponse::Complete(r) => Ok(r),
+        other => panic!("意外响应类型: {other:?}"),
+    }
+}
+
+fn loopback_port() -> String {
+    std::env::var("SER2MCP_LOOPBACK_PORT")
+        .expect("需要环境变量 SER2MCP_LOOPBACK_PORT 指定回环串口（如 COM28）")
+}
+
+/// 确定性伪随机数据（无需 rand 依赖）。
+fn random_file(size: usize) -> Vec<u8> {
+    (0..size)
+        .map(|i| ((i.wrapping_mul(31) + 7) % 251) as u8)
+        .collect()
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str, content: &[u8]) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "ser2mcp-loopback-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, content).expect("写临时文件失败");
+        Self { path }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// 拉取回环缓冲中的全部数据（发送内容应原样返回）。
+async fn read_all_hex(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) -> String {
+    let r = call(
+        client,
+        "uart_read",
+        json!({"port": port, "mode": "hex", "max_bytes": 1_000_000, "idle_ms": 500, "timeout_ms": 15_000}),
+    )
+    .await
+    .expect("uart_read 调用失败");
+    assert!(!r.is_error.unwrap_or(false), "uart_read 报错: {r:?}");
+    r.structured_content
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.as_str())
+        .expect("应返回 hex data")
+        .to_string()
+}
+
+async fn open_port(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) {
+    let r = call(
+        client,
+        "uart_open",
+        json!({"port": port, "baudrate": 115200}),
+    )
+    .await
+    .expect("uart_open 调用失败");
+    assert!(!r.is_error.unwrap_or(false), "uart_open 报错: {r:?}");
+}
+
+#[tokio::test]
+#[ignore = "需要真实回环硬件（TX-RX 短接）"]
+async fn loopback_send_file_all() {
+    let port = loopback_port();
+    let client = connect().await.expect("连接 ser2mcp 失败");
+    let data = random_file(64 * 1024);
+    let tmp = TempFile::new("all", &data);
+
+    // ============ 场景 1：text 模式往返 ============
+    open_port(&client, &port).await;
+    let r = call(
+        &client,
+        "uart_send_file",
+        json!({"port": port, "path": tmp.path, "mode": "text", "chunk_size": 1024}),
+    )
+    .await
+    .expect("send_file 调用失败");
+    assert!(!r.is_error.unwrap_or(false), "send_file 报错: {r:?}");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["reason"], json!("completed"), "text 发送应完成: {v:?}");
+    assert_eq!(v["raw_bytes"], json!(data.len() as u64));
+    assert_eq!(v["sent_bytes"], json!(data.len() as u64));
+    assert_eq!(v["chunks"], json!(64));
+
+    let hex_back = read_all_hex(&client, &port).await;
+    let back = hex::decode(&hex_back).expect("hex 解码失败");
+    assert_eq!(back.len(), data.len(), "读回长度不一致");
+    assert_eq!(back, data, "text 模式回环内容不一致");
+
+    // ============ 场景 2：base64 模式往返 ============
+    let _ = call(&client, "uart_clear", json!({"port": port}))
+        .await
+        .expect("uart_clear 调用失败");
+    let r = call(
+        &client,
+        "uart_send_file",
+        json!({"port": port, "path": tmp.path, "mode": "base64", "chunk_size": 57}),
+    )
+    .await
+    .expect("send_file 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["reason"], json!("completed"));
+    let sent = v["sent_bytes"].as_u64().unwrap();
+    assert!(sent > data.len() as u64, "base64 应膨胀: {sent}");
+
+    let hex_back = read_all_hex(&client, &port).await;
+    let b64_text = String::from_utf8(hex::decode(&hex_back).expect("hex 解码失败"))
+        .expect("base64 应可读为文本");
+    for line in b64_text.lines() {
+        assert!(line.len() <= 76, "base64 行超宽: {}", line.len());
+    }
+    assert!(b64_text.ends_with('\n'), "base64 应以换行结尾");
+    let stripped: Vec<u8> = b64_text.bytes().filter(|&b| b != b'\n').collect();
+    let decoded = STANDARD.decode(stripped).expect("base64 解码失败");
+    assert_eq!(decoded, data, "base64 模式回环解码后不一致");
+
+    // ============ 场景 3：uart_send_cancel 并发中止 ============
+    let _ = call(&client, "uart_clear", json!({"port": port}))
+        .await
+        .expect("uart_clear 调用失败");
+    let client2 = client.clone();
+    let port2 = port.clone();
+    let path2 = tmp.path.clone();
+    let send_task = tokio::spawn(async move {
+        call(
+            &client2,
+            "uart_send_file",
+            json!({"port": port2, "path": path2, "chunk_size": 256, "gap_ms": 100}),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let r = call(&client, "uart_send_cancel", json!({"port": port}))
+        .await
+        .expect("uart_send_cancel 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(
+        v["cancelled"],
+        json!(true),
+        "发送中取消应返回 cancelled=true: {v:?}"
+    );
+    let r = send_task
+        .await
+        .expect("send_file task 崩溃")
+        .expect("send_file 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(
+        v["reason"],
+        json!("cancelled"),
+        "取消后应返回 cancelled: {v:?}"
+    );
+    assert!(
+        v["sent_bytes"].as_u64().unwrap() < data.len() as u64,
+        "应只发送部分: {v:?}"
+    );
+
+    let r = call(&client, "uart_available", json!({"port": port}))
+        .await
+        .expect("uart_available 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["send"]["active"], json!(false));
+    assert_eq!(v["send"]["last_reason"], json!("cancelled"));
+
+    // ============ 场景 4：uart_close 并发中断 ============
+    let client3 = client.clone();
+    let port3 = port.clone();
+    let path3 = tmp.path.clone();
+    let send_task = tokio::spawn(async move {
+        call(
+            &client3,
+            "uart_send_file",
+            json!({"port": port3, "path": path3, "chunk_size": 256, "gap_ms": 100}),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let r = call(&client, "uart_close", json!({"port": port}))
+        .await
+        .expect("uart_close 调用失败");
+    assert_eq!(
+        r.structured_content.as_ref().and_then(|v| v.get("closed")),
+        Some(&json!(true)),
+        "close 应成功并中断发送: {r:?}"
+    );
+    let r = send_task
+        .await
+        .expect("send_file task 崩溃")
+        .expect("send_file 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(
+        v["reason"],
+        json!("cancelled"),
+        "close 中断后 send_file 应返回 cancelled: {v:?}"
+    );
+    assert!(v["sent_bytes"].as_u64().unwrap() < data.len() as u64);
+    let r = call(&client, "uart_available", json!({"port": port}))
+        .await
+        .expect("uart_available 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["open"], json!(false), "close 后端口应已关闭");
+
+    // ============ 场景 5：原始 JSON-RPC 取消通知（notifications/cancelled） ============
+    raw_cancelled_notification_test(&port, &tmp.path).await;
+
+    client.cancel().await.expect("关闭客户端失败");
+}
+
+/// 场景 5：手写 JSON-RPC 帧（Content-Length 头），验证 `notifications/cancelled`
+/// 能中止进行中的 `uart_send_file`（rmcp 服务端收到取消通知会 cancel 请求级
+/// CancellationToken，发送循环在检查点退出）。
+async fn raw_cancelled_notification_test(port: &str, path: &std::path::Path) {
+    let bin = env!("CARGO_BIN_EXE_ser2mcp");
+    let mut child = Command::new(bin)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ser2mcp 失败");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+
+    async fn send_frame(stdin: &mut ChildStdin, v: &Value) {
+        // rmcp 3.x 的 stdio transport 是 newline-delimited JSON（非 Content-Length）。
+        let mut body = serde_json::to_string(v).unwrap();
+        body.push('\n');
+        stdin.write_all(body.as_bytes()).await.unwrap();
+        stdin.flush().await.unwrap();
+    }
+    async fn read_frame(reader: &mut BufReader<ChildStdout>) -> Value {
+        // 逐行读取，跳过空行，直到解析出合法 JSON（newline-delimited）。
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                return v;
+            }
+            // 非 JSON 行（理论上不会出现）继续读
+        }
+    }
+    async fn read_frame_timeout(reader: &mut BufReader<ChildStdout>, what: &str) -> Value {
+        match tokio::time::timeout(Duration::from_secs(10), read_frame(reader)).await {
+            Ok(v) => v,
+            Err(_) => panic!("读取 {what} 响应超时（子进程未响应）"),
+        }
+    }
+
+    // initialize
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "loopback-raw", "version": "0.0.0"}
+            }
+        }),
+    )
+    .await;
+    let resp = read_frame_timeout(&mut reader, "initialize").await;
+    assert_eq!(resp["id"], json!(1), "initialize 响应: {resp:?}");
+
+    send_frame(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+    )
+    .await;
+
+    let mut next_id = 2i64;
+
+    // 打开串口
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": next_id, "method": "tools/call",
+            "params": {"name": "uart_open", "arguments": {"port": port, "baudrate": 115200}}
+        }),
+    )
+    .await;
+    next_id += 1;
+    let resp = read_frame_timeout(&mut reader, "uart_open").await;
+    assert!(resp.get("error").is_none(), "uart_open 失败: {resp:?}");
+
+    // 发起长发送（gap 拉长，保证取消前仍在发送）
+    let send_id = next_id;
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": send_id, "method": "tools/call",
+            "params": {
+                "name": "uart_send_file",
+                "arguments": {"port": port, "path": path, "chunk_size": 256, "gap_ms": 200}
+            }
+        }),
+    )
+    .await;
+    next_id += 1;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 发送取消通知（中止 send_id 请求）
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": send_id, "reason": "loopback-test-cancel"}
+        }),
+    )
+    .await;
+
+    // 查询状态：发送应已中止（active=false, last_reason=cancelled）
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": next_id, "method": "tools/call",
+            "params": {"name": "uart_available", "arguments": {"port": port}}
+        }),
+    )
+    .await;
+    next_id += 1;
+    let resp = read_frame_timeout(&mut reader, "uart_available").await;
+    let content = resp["result"]["structuredContent"].clone();
+    assert_eq!(
+        content["send"]["active"],
+        json!(false),
+        "取消通知后发送应中止: {resp:?}"
+    );
+    assert_eq!(
+        content["send"]["last_reason"],
+        json!("cancelled"),
+        "应记录 cancelled: {resp:?}"
+    );
+
+    // 关闭端口（可能先收到 send_id 的响应，循环读取直到 close 的响应）
+    send_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": next_id, "method": "tools/call",
+            "params": {"name": "uart_close", "arguments": {"port": port}}
+        }),
+    )
+    .await;
+    next_id += 1;
+    for _ in 0..4 {
+        let resp = read_frame_timeout(&mut reader, "close").await;
+        if resp["id"] == json!(next_id - 1) {
+            assert!(resp.get("error").is_none(), "uart_close 失败: {resp:?}");
+            break;
+        }
+        assert_eq!(resp["id"], json!(send_id), "意外响应: {resp:?}");
+    }
+
+    stdin.shutdown().await.unwrap();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}

@@ -43,7 +43,8 @@ flowchart LR
 
 ## Features
 
-- **11 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, expect output, send-on-match, status, clear buffer, close
+- **14 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, expect output, send-on-match, status, clear buffer, close, file send (estimate / send / cancel)
+- **Streaming file send**: `uart_send_file` sends a local file to the serial port in rate-limited chunks in one call (raw `text` / `base64` with automatic line wrapping), replacing per-chunk `uart_write` calls by the model; with `uart_send_estimate` for time estimation and three-level abort via `uart_send_cancel` / `uart_close` / client cancel notification; progress is queryable while sending
 - **Full serial parameter control**: baudrate / data bits (5-8) / parity (none/even/odd) / stop bits (1,2) / flow control (none/software/hardware) / read timeout — all settable via `uart_open` / `uart_configure`
 - **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
@@ -150,9 +151,12 @@ Environment variables (optional):
 | `uart_exchange` | Send + read in one step (`port` required; most common) |
 | `uart_expect` | Wait for a matching output: block until a specified pattern appears on the port or until timeout (`port`, `pattern` required; optional `data` for one-step "send + wait") |
 | `uart_expect_send` | Send on match: wait for a pattern, then send `reply` in the same critical section (`port`, `pattern`, `reply` required) |
-| `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors (`port` required) |
+| `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors, file-send progress (`port` required) |
 | `uart_clear` | Clear unread buffered data (`port` required) |
-| `uart_close` | Close the port and release the handle (`port` required) |
+| `uart_close` | Close the port and release the handle (`port` required; an in-flight file send is interrupted) |
+| `uart_send_estimate` | Estimate file-send bytes and duration (`path` required; no port needed, `baudrate` defaults to 115200) |
+| `uart_send_file` | Streaming file send: send a local file to the port in rate-limited chunks, one call (`port`, `path` required) |
+| `uart_send_cancel` | Abort an in-flight `uart_send_file` (`port` required; no-op when idle) |
 
 > **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
@@ -187,6 +191,45 @@ uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}  // binary 
 
 - The defaults `newline="none"` and `mode="hex"` keep behavior identical to older versions and suit any protocol;
 - return `mode="text"` works only when the data is pure text — any non-text byte falls the whole result back to hex; switch to `read_mode="text-escaped"` in that case.
+
+### File Send (uart_send_estimate → uart_send_file)
+
+For large payloads (a few KB or more — firmware download / file transfer), **do not call `uart_write` chunk by chunk**: every call costs a protocol round-trip and tokens. Use `uart_send_file` — the server loops over chunks (`chunk_size`) with an optional inter-chunk gap (`gap_ms`) internally; the model calls once.
+
+**Typical flow (model perspective):**
+
+```
+1. uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}
+   → estimate sent bytes and duration first (no port needed)
+2. uart_send_file {port, path, mode?, chunk_size?, gap_ms?}
+   → send; returns raw_bytes / sent_bytes / chunks / elapsed_ms / overflow stats
+3. Reconcile: compare with the peer's wc -c / md5sum (sent_bytes ↔ wc -c; raw_bytes ↔ decoded byte count)
+```
+
+**Parameters & semantics:**
+
+| Param | Description |
+|---|---|
+| `port` | Port name (required) |
+| `path` | Local file path (required; the server validates existence, regular file, readability) |
+| `mode` | `text` (default, raw bytes) / `base64` (encoded, wrapped every 76 chars with a trailing `\n`; good for a peer `cat > file` under icanon line buffering) |
+| `chunk_size` | Chunk size in raw bytes, default 256. **The model's responsibility**: check the peer tty limits first (e.g. `stty -a` for line buffer / `icanon`) and the baud rate; pick `chunk_size` ≤ buffer limit, err on the small side — without flow control, an oversized chunk loses bytes irrecoverably |
+| `gap_ms` | Inter-chunk gap in ms, default 0 (the per-chunk flush already rate-limits to the baud rate) |
+
+**Key points:**
+
+- **Only "get the bytes out"**: no format parsing, no automatic EOF. If the peer needs EOF, send `\x04` via `uart_write` (usually triggers EOF under icanon; if unreliable, use `dd bs=1 count=N` on the peer to stop after N bytes)
+- **base64 inflation**: actual bytes ≈ file_size × 4/3 + newlines (one per 76 chars); when picking `chunk_size`, divide the peer tty buffer by ~1.34
+- **Duration estimate**: 8N1 formula `time ≈ sent_bytes × 10 / baudrate + chunks × gap_ms`; 1 MiB @ 115200 ≈ 87 s — estimate first and warn the user about the expected wait
+- **`io_lock` is held during the send**: `uart_configure` / `uart_close` queue until it finishes; `uart_available` is unaffected and reports `send` progress (`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`)
+- **Abort**: `uart_send_cancel` (checkpoint exit, at most one extra chunk), `uart_close` (interrupts the send, then closes), or a client `notifications/cancelled`; on abort it returns `reason="cancelled"` plus sent stats so the model can reconcile and decide whether to resend
+- **Partial failure**: write / read errors return an error that includes bytes/chunks already sent
+
+**Real-board notes** (tested on an actual Linux board):
+
+- **Run `stty raw` on the peer before receiving binary (`text` mode)**: the default tty IXON flow control consumes `\x11`/`\x13` (Ctrl-Q/S) inside the data and ICRNL translates `\r`, corrupting the payload; `stty raw` disables all translations
+- **A trailing `\r\n` on a command line leaves a stray `\n` in the peer tty** (`\r` delivers the line, `\n` is left for the next reader), so `cat`/`dd` pick up an extra leading byte — account for it when reconciling, or use `newline="lf"` for commands
+- **Ending `cat`**: under base64 + icanon, `uart_write {data: "04"}` (`\x04` EOF) usually works; reconcile with `base64 -d | wc -c` / `md5sum`
 
 ### Read Semantics (Core Design)
 
