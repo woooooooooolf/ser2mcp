@@ -80,13 +80,12 @@ struct TempFile {
 
 impl TempFile {
     fn new(name: &str, content: &[u8]) -> Self {
+        // 进程内唯一计数器避免并行测试临时文件命名冲突（as_nanos 可能碰撞）。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "ser2mcp-loopback-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, content).expect("写临时文件失败");
         Self { path }

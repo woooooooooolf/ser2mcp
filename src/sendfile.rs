@@ -211,16 +211,18 @@ mod tests {
     use super::*;
     use std::io::{Seek, Write};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一计数器：并行测试在同一纳秒创建临时文件时避免命名冲突
+    /// （as_nanos 命名在并行下可能碰撞，导致 create(true) 覆盖损坏数据）。
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     /// 创建临时文件（写入数据后指针回到开头），返回 (File, path) 供测试后清理。
     fn tempfile_with(data: &[u8]) -> (File, PathBuf) {
         let path = std::env::temp_dir().join(format!(
             "ser2mcp-sendfile-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let mut f = std::fs::File::options()
             .create(true)
