@@ -148,7 +148,7 @@ Environment variables (optional):
 | `uart_configure` | Re-configure a running port (`port` required; only updates passed fields) |
 | `uart_write` | Send data, return immediately (`port` required; no reply waiting) |
 | `uart_read` | Pull buffered ingress data (`port` required) |
-| `uart_exchange` | Send + read in one step (`port` required; most common) |
+| `uart_exchange` | Send + read in one step (`port` required; short commands, idle-based completion) |
 | `uart_expect` | Wait for a matching output: block until a specified pattern appears on the port or until timeout (`port`, `pattern` required; optional `data` for one-step "send + wait") |
 | `uart_expect_send` | Send on match: wait for a pattern, then send `reply` in the same critical section (`port`, `pattern`, `reply` required) |
 | `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors, file-send progress (`port` required) |
@@ -159,7 +159,6 @@ Environment variables (optional):
 | `uart_send_cancel` | Abort an in-flight `uart_send_file` (`port` required; no-op when idle) |
 
 > **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
-
 
 ### Usage Guide (for AI Agents)
 
@@ -183,7 +182,7 @@ uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                      
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # binary frame
 uart_expect    {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}  # send + wait for prompt, one step
 uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # wait for prompt
-uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}           # press key on match
+uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}           # press key on match
 ```
 
 ### AI Agent Compatibility
@@ -201,7 +200,7 @@ The SKILLs use the generic Agent Skills format (`SKILL.md` with `name` / `descri
 3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT command (hex)
 4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command
 5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
-6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
+6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}  → press key on match (bootdelay window)
 7. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
 8. uart_close {port: "COM3"}
 ```
@@ -215,6 +214,7 @@ uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → send i
 uart_write {port: "COM3", data: "04"}                                  → send \x04 to end the peer's cat (EOF)
 uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → reconcile
 ```
+
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
 
 Built-in one-command self-test: enumerate ports + run a full loopback verification on a given port (sends the full 0x00-0xFF byte sequence and verifies it comes back unchanged):

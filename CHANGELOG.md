@@ -6,7 +6,9 @@
 
 ### Changed
 
+- **破坏性接口变更**：`uart_read` 的返回编码参数由 `mode` 统一为 `read_mode`（与 `uart_exchange` / `uart_expect` / `uart_expect_send` 一致），旧参数 `mode` 不再接受——升级时需同步更新客户端调用
 - `ser2mcp-usage` SKILL 与 INSTRUCTIONS 完善终端会话用法：推荐 `uart_expect` 带 `data` 一步"发送+等待"、等提示符收尾（提示符因设备而异，不可用时改用命令特有结束标记）；推荐终端场景 `read_mode="text-escaped"`（纯二进制读取仍用 hex）；明确语义边界（idle 返回 ≠ 命令完成；长命令 `uart_expect` 与 idle 无关、`timeout_ms` 为兜底上限可放大到覆盖命令时长）；补充可选对齐手段（`\x15` 清板端行缓冲 / `\x03` 中断，tty 需处于 icanon；`uart_clear` 仅清宿主上行缓冲）；新增"环境假设与接口选择原则"章节（假设清单、失效信号、工具语义不变性、按设备能力选接口）
+- 修正 `uart_expect_send` 示例缺失 `reply_mode: "text"` 的问题（默认 hex 模式下 `reply: "\n"` 解析失败）；`uart_exchange` 定位由"最常用"明确为"短命令、idle 收尾"
 
 ## [0.7.0] - 2026-08-07
 
