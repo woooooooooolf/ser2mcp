@@ -54,7 +54,7 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 
 串口上行由读线程持续囤积在环形缓冲（写满覆盖最旧并计数溢出），工具按需拉取。`uart_read` / `uart_exchange` 在以下条件之一满足时返回：
 
-1. **空闲判定**：以收到最后一个字节为起点，持续 `idle_ms`（默认 300ms）无新数据且驱动无残留 → 响应结束（`reason: "idle"`）。`idle_ms` 应大于设备响应间隙（否则响应被截断），调小则降低延迟。
+1. **空闲判定**：以收到最后一个字节为起点，持续 `idle_ms`（默认 300ms）无新数据且驱动无残留 → 响应结束（`reason: "idle"`）。`idle_ms` 应大于设备响应间隙（否则响应被截断），调小则降低延迟。**它度量的是字节流里的静默，不是命令执行时间**——慢操作（需数秒）不要靠加大 `idle_ms` 干等，改用 `uart_expect` 输出锚点。
 2. **达到上限**：未读字节 ≥ `max_bytes`（默认 64 KiB）→ 防堆积。
 3. **总超时**：等待超过 `timeout_ms`（默认 5000ms）。
 
@@ -66,6 +66,8 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 - 需要"完成即触发"用 `uart_expect_send`（pattern 命中后在同一临界区内立即发送 reply，如 `{pattern: "Hit any key", reply: "\n"}` 抢 bootdelay 窗口）。
 - 仅当设备没有明确锚点（如 AT 命令）时才用 `uart_exchange` 的 idle 判定收尾。
 - `pattern` 是**精确子串匹配**（大小写敏感，不支持正则），作用于原始字节：设备输出带 ANSI 颜色码时用纯文本关键字（`"login:"`）仍可命中，返回用 `read_mode="text-escaped"` 即可读。
+- **历史数据立即参与匹配**：调用时缓冲中已囤积的数据（如 `uart_open` 后设备启动的 bootlog）直接参与查找，可能无需等待即命中。
+- **溢出注意**：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时——返回值 `overflow_delta > 0` 可识别该情况。
 - `consume=true`（默认）返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲、会混入下次读取；需要精确对齐时先 `uart_clear` 或先 `uart_read` 消费残留。
 
 ## 6. 故障排查
