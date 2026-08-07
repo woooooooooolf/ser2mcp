@@ -160,167 +160,60 @@ Environment variables (optional):
 
 > **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
-### Data Representation (hex / text / text-escaped)
 
-| Encoding | Send (`mode`) | Return (`read_mode`) | Description |
-|---|---|---|---|
-| `hex` (default) | ✅ | ✅ | Two uppercase hex chars per byte, space-separated; binary-safe |
-| `text` | ✅ | ✅ | UTF-8 string; on return, falls back to hex **as a whole** if any byte is non-text (strict check) |
-| `text-escaped` | ❌ | ✅ | Text-first: printable UTF-8 kept as-is, `\r` `\n` `\t` preserved, control bytes (e.g. ESC of ANSI color codes) and invalid UTF-8 bytes escaped as `\xNN`, literal `\` escaped as `\\`; always readable, never falls back |
+### Usage Guide (for AI Agents)
 
-> **Terminal commands must end with a line terminator**: `uart_write` / `uart_exchange` / `uart_expect` accept a `newline` argument for `data` (`none` default / `lf` appends `\n` / `crlf` appends `\r\n`). Interactive terminals (shell, uboot, …) do not execute a command until it receives a carriage return; a command sent without a terminator also **stays in the device line buffer and merges with the next command** (measured: `"ls"` followed by `"ls /"` actually executes `"lsls /"`). So for terminal scenarios explicitly pass `newline="crlf"` or include `\r\n` in `data`.
+The full usage guide ships as SKILLs bundled with the plugin, loaded on demand by the agent (see "AI Agent Compatibility" below):
 
-### Choosing an Encoding by Scenario (Minimal Examples)
+- `ser2mcp-usage` — tool reference, data representation & encoding choices, read/expect semantics, command-completion detection, troubleshooting
+- `ser2mcp-file-transfer` — full streaming file-send workflow (estimate / send / EOF / reconcile, peer-tty notes)
 
-**Interactive terminal (Linux Shell / uboot)**: commands need a line terminator to execute; output often contains ANSI color codes.
+**Quick points** (authoritative semantics live in the SKILLs):
 
-```
-uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}
-```
+- Encoding: `hex` (default, binary-safe) / `text` (UTF-8) / `text-escaped` (return side only; control bytes escaped as `\xNN`). Terminal commands **must** carry a line terminator via `newline="crlf"` — otherwise the command stays in the device line buffer and can be concatenated with the next one
+- Read: `uart_read` / `uart_exchange` return on idle (`idle_ms`, default 300ms — keep above the device response gap), max size (`max_bytes`, default 64 KiB), or total timeout (`timeout_ms`, default 5000ms); `overflow_delta > 0` means the ring buffer overflowed and data was lost
+- Completion: prefer `uart_expect` output anchors (e.g. `"# "`, `"Zynq>"`) — return is millisecond-fast on match; do not sleep-poll or inflate timeouts
+- Large files: `uart_send_estimate` → `uart_send_file` in one call (never chunk with `uart_write`), then reconcile with the peer's `wc -c` / `md5sum`
 
-- `newline="crlf"` appends `\r\n` automatically, so the command executes on return;
-- `read_mode="text-escaped"` keeps text primary and escapes control bytes (e.g. `\x1B[...`), keeping the whole output readable;
-- for multi-command flows, use `uart_expect` on a prompt anchor (e.g. `pattern: "# "`) to judge command completion.
-
-**MCU / AT command debugging**: protocols are byte-exact; no bytes should be appended implicitly.
+**Common examples**:
 
 ```
-uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}            // text command, terminator included in data
-uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}  // binary frame, exact hex transfer
+uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  # terminal command
+uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                                            # AT command
+uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # binary frame
+uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # wait for prompt
+uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}           # press key on match
 ```
 
-- The defaults `newline="none"` and `mode="hex"` keep behavior identical to older versions and suit any protocol;
-- return `mode="text"` works only when the data is pure text — any non-text byte falls the whole result back to hex; switch to `read_mode="text-escaped"` in that case.
+### AI Agent Compatibility
 
-### File Send (uart_send_estimate → uart_send_file)
+The SKILLs use the generic Agent Skills format (`SKILL.md` with `name` / `description` frontmatter) and work across tools:
 
-For large payloads (a few KB or more — firmware download / file transfer), **do not call `uart_write` chunk by chunk**: every call costs a protocol round-trip and tokens. Use `uart_send_file` — the server loops over chunks (`chunk_size`) with an optional inter-chunk gap (`gap_ms`) internally; the model calls once.
+- **Reasonix**: installed with the plugin; invoke as `/ser2mcp:ser2mcp-usage` / `/ser2mcp:ser2mcp-file-transfer`, or let the agent auto-select by `description`
+- **Claude Code / Codex**: mount the repository `skills/` directory as `.claude/skills/` (or `.codex/skills/`) and use it directly
 
-**Typical flow (model perspective):**
-
-```
-1. uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}
-   → estimate sent bytes and duration first (no port needed)
-2. uart_send_file {port, path, mode?, chunk_size?, gap_ms?}
-   → send; returns raw_bytes / sent_bytes / chunks / elapsed_ms / overflow stats
-3. Reconcile: compare with the peer's wc -c / md5sum (sent_bytes ↔ wc -c; raw_bytes ↔ decoded byte count)
-```
-
-**Complete example** (base64 file transfer to a Linux board, end-to-end reconcilable):
-
-```
-# 1. Peer starts receiving (icanon line reads; use newline="lf" for a Linux shell to avoid \r residue)
-uart_exchange {port, data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}
-# 2. Send in one call (base64 wraps every 76 chars, trailing \n appended)
-uart_send_file {port, path: "C:/tmp/fw.bin", mode: "base64", chunk_size: 256}
-# 3. Send \x04 to end the peer's cat (triggers EOF under icanon)
-uart_write {port, data: "04"}
-# 4. Reconcile: wc -c should equal sent_bytes; md5sum should match the local file
-uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
-# If reason=cancelled / device_error or sent_bytes < raw_bytes: reconcile the partial progress, then resend
-```
-
-**Parameters & semantics:**
-
-| Param | Description |
-|---|---|
-| `port` | Port name (required) |
-| `path` | Local file path (required; the server validates existence, regular file, readability) |
-| `mode` | `text` (default, raw bytes) / `base64` (encoded, wrapped every 76 chars with a trailing `\n`; good for a peer `cat > file` under icanon line buffering) |
-| `chunk_size` | Chunk size in raw bytes, default 256. **The model's responsibility**: check the peer tty limits first (e.g. `stty -a` for line buffer / `icanon`) and the baud rate; pick `chunk_size` ≤ buffer limit, err on the small side — without flow control, an oversized chunk loses bytes irrecoverably |
-| `gap_ms` | Inter-chunk gap in ms, default 0 (the per-chunk flush already rate-limits to the baud rate) |
-
-**Key points:**
-
-- **Only "get the bytes out"**: no format parsing, no automatic EOF. If the peer needs EOF, send `\x04` via `uart_write` (usually triggers EOF under icanon; if unreliable, use `dd bs=1 count=N` on the peer to stop after N bytes)
-- **base64 inflation**: actual bytes ≈ file_size × 4/3 + newlines (one per 76 chars); when picking `chunk_size`, divide the peer tty buffer by ~1.34
-- **Duration estimate**: 8N1 formula `time ≈ sent_bytes × 10 / baudrate + chunks × gap_ms`; 1 MiB @ 115200 ≈ 87 s — estimate first and warn the user about the expected wait
-- **`io_lock` is held during the send**: `uart_configure` / `uart_close` queue until it finishes; `uart_available` is unaffected and reports `send` progress (`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`)
-- **Abort**: `uart_send_cancel` (checkpoint exit, at most one extra chunk), `uart_close` (interrupts the send, then closes), or a client `notifications/cancelled`; on abort it returns `reason="cancelled"` plus sent stats so the model can reconcile and decide whether to resend
-- **Device-error awareness**: if the reader thread detects a fatal error (e.g. the serial device was physically unplugged), the send aborts at the next checkpoint with `reason="device_error"` plus `device_error` details — the write side may still "fake-success" (bytes enter the driver buffer while the device is gone), so trust this field and reconcile with the peer
-- **Partial failure**: write / read errors return an error that includes bytes/chunks already sent
-
-**Real-board notes** (tested on an actual Linux board):
-
-- **Run `stty raw` on the peer before receiving binary (`text` mode)**: the default tty IXON flow control consumes `\x11`/`\x13` (Ctrl-Q/S) inside the data and ICRNL translates `\r`, corrupting the payload; `stty raw` disables all translations
-- **A trailing `\r\n` on a command line leaves a stray `\n` in the peer tty** (`\r` delivers the line, `\n` is left for the next reader), so `cat`/`dd` pick up an extra leading byte — account for it when reconciling, or use `newline="lf"` for commands
-- **Ending `cat`**: under base64 + icanon, `uart_write {data: "04"}` (`\x04` EOF) usually works; reconcile with `base64 -d | wc -c` / `md5sum`
-
-### Read Semantics (Core Design)
-
-Serial ingress is **continuously buffered** by the background reader thread and **pulled on demand** by tools. `uart_read` / `uart_exchange` return all unread data when any of these three conditions is met:
-
-1. **Idle detection**: starting from the moment the **last byte** was received by the ring buffer, no new bytes for `idle_ms` (default 300ms) and no bytes left in the driver buffer → the response is considered complete (`reason: "idle"`)
-2. **Cap reached**: unread bytes ≥ `max_bytes` (default 64 KiB) → prevents backlog (`reason: "max_bytes"`)
-3. **Total timeout**: waiting exceeds `timeout_ms` (default 5000ms) (`reason: "timeout"`)
-
-Example return value:
-
-```json
-{
-  "data": "41 54 0D 0A 4F 4B 0D 0A",
-  "bytes": 8,
-  "mode": "hex",
-  "reason": "idle",
-  "overflow_delta": 0,
-  "overflow_total": 0,
-  "buffered_bytes": 0
-}
-```
-
-> `overflow_delta > 0` means bytes were overwritten since the last read because the buffer was full — data has gaps; increase `buffer_size` or read more frequently.
-
-> **`idle_ms` semantics**: it measures the **silent gap inside a response** — chunks separated by less than `idle_ms` merge into one response, more than `idle_ms` split into two. It must be **larger than the device's response gap** (otherwise responses get truncated); lowering it reduces round-trip latency (judgement precision is limited by the 10ms poll). Note it measures "silence in the byte stream", **not command execution time** — for slow operations (taking seconds), do not wait by raising `idle_ms`; use `uart_expect` with an output anchor instead (see next section).
-
-### Content-Match Semantics (uart_expect / uart_expect_send)
-
-Unlike the **time-based semantics** (idle detection) of `uart_read` / `uart_exchange`, the expect tools are **content-based**: they wait until a given string appears in the ingress, then return (or time out). This moves the "is the device ready?" decision into the server (match returns in milliseconds) and replaces AI-side `sleep` + blind-send timing loops:
-
-- `uart_expect {port, pattern: "Zynq>", pattern_mode: "text"}`: wait for a prompt; optional `data` sends first, one-step "send + wait"
-- `uart_expect_send {port, pattern: "Hit any key", reply: "\n", pattern_mode: "text"}`: press a key the moment the pattern appears — wins the bootdelay window
-
-Behavior notes:
-
-- **Exact substring match** (case-sensitive), no regex; patterns split across multiple read chunks or across ring-buffer wrap are still matched
-- **Historical data matches immediately**: data already buffered at call time (e.g. bootlog accumulated after `uart_open`) participates in the search — may hit without waiting
-- **consume semantics**: `consume=true` (default) takes and returns everything up to and including the pattern; bytes after the pattern stay buffered (readable later via `uart_read`). `consume=false` waits without consuming
-- **timeout semantics**: if not matched within `timeout_ms` (default 5000), returns `matched=false`, `reason="timeout"`; data is not consumed (left buffered for diagnosis)
-- **overflow caveat**: if the buffer overflows and overwrites the pattern and the device never resends it, expect waits until timeout; `overflow_delta > 0` in the result helps identify this
-- **ANSI-immune**: pattern matching runs on the raw bytes and is independent of the return encoding — when device output contains ANSI color codes, a plain-text keyword (e.g. `"login:"`, `"# "`) still matches; read the result with `read_mode="text-escaped"`
-- **Residual data**: after `consume=true`, bytes after the pattern stay buffered and mix into the next `uart_read` / `uart_exchange` result (normal semantics — they are unread data); use `uart_clear` or drain with `uart_read` first when exact alignment matters
-
-### Usage Pattern: Short Commands + Output Anchors (recommended)
-
-- Send one **short command** at a time, then determine completion immediately — never blind-wait with `sleep`
-- Prefer **output anchors** to judge completion: `uart_expect` waits for a prompt/keyword (e.g. shell `# `, `$ `, or a device status string); once the anchor appears, the command is done — send the next one; use `uart_expect_send` for "act on match"
-- Fall back to `uart_exchange` idle semantics only when the device has no clear anchor (e.g. AT commands)
-- For slow operations (taking seconds), do not raise `timeout_ms` and wait idly — use `uart_expect` on an anchor; it returns in milliseconds once matched
-
-## Typical Usage (AI Agent Perspective)
+### Typical Usage (AI Agent Perspective)
 
 ```
 1. uart_list_ports                      → find "COM3"
 2. uart_open {port: "COM3", baudrate: 115200}
-3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT command (hex, terminator included)
-4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command (see scenario above)
+3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT command (hex)
+4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → terminal command
 5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → wait for prompt (timing)
 6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}  → press key on match (bootdelay window)
 7. uart_configure {port: "COM3", baudrate: 9600}      → re-configure after device baudrate switch
 8. uart_close {port: "COM3"}
 ```
 
-File transfer scenario (large files: use `uart_send_file` in one call, do not chunk with `uart_write`; see the "File Send" section):
+File transfer scenario (large files: `uart_send_file` in one call; full workflow in the `ser2mcp-file-transfer` SKILL):
 
 ```
-1. uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → estimate duration/bytes first
-2. uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → peer starts receiving
-3. uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → send in one call
-4. uart_write {port: "COM3", data: "04"}                                  → send \x04 to end the peer's cat (EOF)
-5. uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → reconcile (wc -c should equal sent_bytes)
+uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → estimate duration first
+uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → peer starts receiving
+uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → send in one call
+uart_write {port: "COM3", data: "04"}                                  → send \x04 to end the peer's cat (EOF)
+uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → reconcile
 ```
-
-> **Latency note (for AI tools)**: ser2mcp uses an event-driven / non-blocking reader thread (Unix `poll`, Windows 1ms polling); `read_timeout_ms` (default 500ms) is only a safety cap for `read()` and does not affect latency. The fixed wait per read/write round-trip comes mainly from `idle_ms` (default 300ms) — tuning guidance is in the `idle_ms` semantics note above.
-
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)
 
 Built-in one-command self-test: enumerate ports + run a full loopback verification on a given port (sends the full 0x00-0xFF byte sequence and verifies it comes back unchanged):
