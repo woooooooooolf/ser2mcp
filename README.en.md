@@ -172,7 +172,7 @@ The full usage guide ships as SKILLs bundled with the plugin, loaded on demand b
 
 - Encoding: `hex` (default, binary-safe) / `text` (UTF-8) / `text-escaped` (return side only; control bytes escaped as `\xNN`). Terminal commands **must** carry a line terminator via `newline="crlf"` — otherwise the command stays in the device line buffer and can be concatenated with the next one
 - Read: `uart_read` / `uart_exchange` return on idle (`idle_ms`, default 300ms — keep above the device response gap), max size (`max_bytes`, default 64 KiB), or total timeout (`timeout_ms`, default 5000ms); `overflow_delta > 0` means the ring buffer overflowed and data was lost
-- Completion: prefer `uart_expect` output anchors (e.g. `"# "`, `"Zynq>"`) — return is millisecond-fast on match; do not sleep-poll or inflate timeouts
+- Completion: prefer `uart_expect` output anchors (e.g. `"# "`, `"Zynq>"`) — return is millisecond-fast on match; do not sleep-poll or inflate timeouts. Prompts vary by device; when unavailable (echo off / prompt-less device) use a command-specific end marker instead. For long commands (wget/tar unpack etc.), `uart_expect` is idle-independent and its `timeout_ms` is only a fallback cap (5 min max, returns early on match) — it can be raised to cover the whole command duration
 - Large files: `uart_send_estimate` → `uart_send_file` in one call (never chunk with `uart_write`), then reconcile with the peer's `wc -c` / `md5sum`
 
 **Common examples**:
@@ -181,6 +181,7 @@ The full usage guide ships as SKILLs bundled with the plugin, loaded on demand b
 uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  # terminal command
 uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                                            # AT command
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # binary frame
+uart_expect    {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}  # send + wait for prompt, one step
 uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # wait for prompt
 uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", pattern_mode: "text"}           # press key on match
 ```

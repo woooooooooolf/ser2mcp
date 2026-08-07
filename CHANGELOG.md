@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- `ser2mcp-usage` SKILL 与 INSTRUCTIONS 完善终端会话用法：推荐 `uart_expect` 带 `data` 一步"发送+等待"、等提示符收尾（提示符因设备而异，不可用时改用命令特有结束标记）；推荐终端场景 `read_mode="text-escaped"`（纯二进制读取仍用 hex）；明确语义边界（idle 返回 ≠ 命令完成；长命令 `uart_expect` 与 idle 无关、`timeout_ms` 为兜底上限可放大到覆盖命令时长）；补充可选对齐手段（`\x15` 清板端行缓冲 / `\x03` 中断，tty 需处于 icanon；`uart_clear` 仅清宿主上行缓冲）；新增"环境假设与接口选择原则"章节（假设清单、失效信号、工具语义不变性、按设备能力选接口）
+
 ## [0.7.0] - 2026-08-07
 
 ### Added
