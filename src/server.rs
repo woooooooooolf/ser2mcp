@@ -67,7 +67,8 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 - 交互式终端（Linux Shell / uboot）：命令需行尾触发，输出常含 ANSI 颜色码。
   uart_exchange {port, data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}
   newline="crlf" 自动追加 \r\n 使命令执行；text-escaped 使颜色码转义、输出可读；
-  多命令流程用 uart_expect 等提示符锚点（如 pattern: "# "）判断完成。
+  多命令流程用 uart_expect 等提示符锚点（如 pattern: "# "）判断完成，可一步"发送+等待"：
+  uart_expect {port, data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}
 - MCU / AT 指令调试：协议逐字节严格，不自动追加字节。
   uart_exchange {port, data: "AT\r\n", mode: "text"} 或 uart_exchange {port, data: "AA 55 01 00 0D 0A", mode: "hex"}
   缺省 newline="none"、mode="hex" 时行为与旧版一致，适配任意协议。
@@ -103,7 +104,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   consume=true（默认）时返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲；
   consume=false 时纯等待、数据不消费。调用时缓冲中已有的数据立即参与匹配（可命中历史输出）。
 - uart_expect_send 等待 pattern 出现后在同一临界区内立即发送 reply（如
-  {"pattern": "Hit any key", "reply": "\\n"} 抢 bootdelay 窗口），超时未命中时不发送。
+  {"pattern": "Hit any key", "reply": "\\n", "reply_mode": "text"} 抢 bootdelay 窗口），超时未命中时不发送。
 - 两者均为精确子串匹配（大小写敏感），不支持正则；命中即返回（毫秒级），时序编排见上文
   "命令执行完成判定"。
 - pattern 匹配作用于原始字节，与返回编码无关：设备输出带 ANSI 颜色码时，
@@ -212,7 +213,7 @@ pub struct ReadArgs {
     pub timeout_ms: Option<u64>,
     /// 返回编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped
     /// （文本为主，控制字节/非法 UTF-8 以 \xNN 转义，恒可读不降级）。
-    pub mode: Option<String>,
+    pub read_mode: Option<String>,
 }
 
 /// 串口工具参数：uart_exchange。
@@ -787,7 +788,7 @@ impl Ser2Mcp {
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        let mode = args.mode.unwrap_or_else(|| "hex".into());
+        let mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
         }
@@ -812,7 +813,8 @@ impl Ser2Mcp {
         }
     }
 
-    /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复。对大多数 AT 命令/查询场景最常用。
+    /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复。
+    /// 适合短命令/无锚点场景（如 AT 查询）；长命令（存在中间静默期）改用 uart_expect。
     #[tool(
         description = "发送数据并等待回复（port 必填；uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。"
     )]

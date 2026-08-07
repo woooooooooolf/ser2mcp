@@ -317,7 +317,7 @@ async fn main() {
     let r = call(
         &client,
         "uart_read",
-        json!({"port": port, "idle_ms": 100, "timeout_ms": 1500, "mode": "text"}),
+        json!({"port": port, "idle_ms": 100, "timeout_ms": 1500, "read_mode": "text"}),
     )
     .await
     .expect("uart_read 失败");

@@ -153,12 +153,12 @@ async fn e2e_tool_registration_and_errors() {
         "uart_read",
         json!({
             "port": "COM_SER2MCP_NONEXISTENT",
-            "mode": "base64",
+            "read_mode": "base64",
             "timeout_ms": 100
         }),
     )
     .await;
-    assert!(r.is_err(), "非法 mode 应触发 invalid_params");
+    assert!(r.is_err(), "非法 read_mode 应触发 invalid_params");
 
     // 8. uart_open 不存在的端口 → 工具级错误
     let r = call(
@@ -294,7 +294,7 @@ async fn e2e_text_escaped_and_newline_params() {
     let r = call(
         &client,
         "uart_read",
-        json!({"port": "COM_SER2MCP_NONEXISTENT", "mode": "text-escaped", "timeout_ms": 100}),
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "read_mode": "text-escaped", "timeout_ms": 100}),
     )
     .await
     .expect("read 调用失败");
@@ -342,7 +342,7 @@ async fn e2e_text_escaped_and_newline_params() {
     let r = call(
         &client,
         "uart_read",
-        json!({"port": "COM_SER2MCP_NONEXISTENT", "mode": "base64", "timeout_ms": 100}),
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "read_mode": "base64", "timeout_ms": 100}),
     )
     .await;
     assert!(r.is_err(), "非法 read_mode 应触发 invalid_params");

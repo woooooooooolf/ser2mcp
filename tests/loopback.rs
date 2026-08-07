@@ -103,7 +103,7 @@ async fn read_all_hex(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) -> Stri
     let r = call(
         client,
         "uart_read",
-        json!({"port": port, "mode": "hex", "max_bytes": 1_000_000, "idle_ms": 500, "timeout_ms": 15_000}),
+        json!({"port": port, "read_mode": "hex", "max_bytes": 1_000_000, "idle_ms": 500, "timeout_ms": 15_000}),
     )
     .await
     .expect("uart_read 调用失败");
