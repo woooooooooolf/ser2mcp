@@ -60,6 +60,7 @@ jobs:
             cp target/release/ser2mcp "$PKG/"
           fi
           cp README.md README.en.md LICENSE-MIT LICENSE-APACHE "$PKG/"
+          cp reasonix-plugin.json "$PKG/"
           cp -r skills "$PKG/"
           cp -r target/doc/* "$PKG/docs/"
           # rustdoc 不再生成根 index.html，补一个重定向页作为文档入口

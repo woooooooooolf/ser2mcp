@@ -14,6 +14,7 @@
 ### Changed
 
 - README（中英）精简：操作指南（数据表示/读取语义/内容匹配/文件发送/典型用法）压缩为要点 + SKILL 指针，新增"AI Agent 兼容"小节
+- release 打包补充 `reasonix-plugin.json`（连同 `bin/`、`skills/` 进压缩包，解压即插件包）
 
 ## [0.6.0] - 2026-08-07
 
