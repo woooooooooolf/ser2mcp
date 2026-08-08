@@ -53,23 +53,13 @@ jobs:
         run: |
           VERSION="V${{ steps.version.outputs.version }}"
           PKG="release/${{ matrix.artifact }}-$VERSION"
-          mkdir -p "$PKG/docs" "$PKG/bin"
+          mkdir -p "$PKG/docs"
           if [ -f target/release/ser2mcp.exe ]; then
             cp target/release/ser2mcp.exe "$PKG/"
-            cp target/release/ser2mcp.exe "$PKG/bin/"
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            cp target/release/ser2mcp "$PKG/"
-            cp target/release/ser2mcp "$PKG/bin/ser2mcp-macos"
           else
             cp target/release/ser2mcp "$PKG/"
-            cp target/release/ser2mcp "$PKG/bin/ser2mcp"
-          fi
-          cp bin/ser2mcp.cmd "$PKG/bin/"
-          if [ "$RUNNER_OS" != "Windows" ]; then
-            chmod +x "$PKG/bin/ser2mcp.cmd" "$PKG/bin/ser2mcp"*
           fi
           cp README.md README.en.md LICENSE-MIT LICENSE-APACHE "$PKG/"
-          cp reasonix-plugin.json "$PKG/"
           cp -r skills "$PKG/"
           cp -r target/doc/* "$PKG/docs/"
           # rustdoc 不再生成根 index.html，补一个重定向页作为文档入口

@@ -131,7 +131,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 
 > `bin/ser2mcp.cmd` 是跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`；注意保持纯 ASCII，cmd.exe 在非 UTF-8 代码页下解析非 ASCII 字节会出错）。
 >
-> 离线安装：也可用 `install_source` 的本地路径作为源（本地仓库目录或解压后的 release 包目录），同样按插件包方式安装。
+> 离线安装：将完整源码仓库下载到本地，并将仓库目录作为 `install_source` 的本地路径。
 
 环境变量（可选）：
 

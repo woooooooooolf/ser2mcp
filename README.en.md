@@ -131,7 +131,7 @@ The root `reasonix-plugin.json` declares ser2mcp as a standard MCP server (`bin/
 
 > `bin/ser2mcp.cmd` is the cross-platform launcher (Unix picks `ser2mcp` / `ser2mcp-macos` via `uname`, Windows calls `ser2mcp.exe`; keep it pure ASCII — cmd.exe misparses non-ASCII bytes on non-UTF-8 code pages).
 >
-> Offline install: point `install_source` at a local path (a local clone or an extracted release package) — it installs the same plugin-package way.
+> Offline install: download the complete source repository and pass the repository directory to `install_source` as a local path.
 
 Environment variables (optional):
 

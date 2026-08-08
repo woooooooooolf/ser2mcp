@@ -8,7 +8,7 @@
 
 - 修正 `uart_send_estimate.est_chunks` 在 base64 模式下未计入跨分片编码收尾/末尾换行片的问题，使估算片数与 `uart_send_file.chunks` 一致
 - 同步 MCP schema、INSTRUCTIONS、README 与 SKILL 的资源上限、全局 I/O 临界区、base64 连续编码、发送取消和对账语义，移除会误判完整性或数据不丢失的表述
-- Release 包补齐 `reasonix-plugin.json` 所需的 `bin/ser2mcp.cmd` 与平台二进制目录结构，使解压后的产物可作为 Reasonix 插件离线安装
+- 精简 Release 包内容：平台二进制位于包根目录（与 `skills/` 同级），不再打包 `reasonix-plugin.json` 与 `bin/`
 
 ## [0.8.1] - 2026-08-08
 
