@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use tokio_util::sync::CancellationToken;
 
+pub use crate::ring::MAX_BUFFER_SIZE;
 use crate::ring::RingBuf;
 
 /// 默认波特率（115200）。
@@ -42,6 +43,8 @@ pub const DEFAULT_IDLE_MS: u64 = 300;
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// 默认总等待超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+/// 读取/交换工具允许的最大总等待时间（毫秒，5 分钟）。
+pub const MAX_READ_TIMEOUT_MS: u64 = 300_000;
 /// `uart_expect` / `uart_expect_send` 的 `timeout_ms` 上限（毫秒，5 分钟）。
 ///
 /// expect 持有 `io_lock` 直到超时返回，期间其它工具调用全部排队；

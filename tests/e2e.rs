@@ -262,6 +262,50 @@ async fn e2e_tool_registration_and_errors() {
     .await;
     assert!(r.is_err(), "timeout_ms 超上限应触发 invalid_params");
 
+    // 18. 资源参数超上限必须在进入串口/文件操作前拒绝
+    let r = call(
+        &client,
+        "uart_open",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "buffer_size": 16 * 1024 * 1024 + 1}),
+    )
+    .await;
+    assert!(r.is_err(), "buffer_size 超上限应触发 invalid_params");
+
+    let r = call(
+        &client,
+        "uart_send_estimate",
+        json!({"path": "missing.bin", "chunk_size": 1024 * 1024 + 1}),
+    )
+    .await;
+    assert!(r.is_err(), "chunk_size 超上限应触发 invalid_params");
+
+    let r = call(
+        &client,
+        "uart_read",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "timeout_ms": 300001}),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "uart_read timeout_ms 超上限应触发 invalid_params"
+    );
+
+    let r = call(
+        &client,
+        "uart_exchange",
+        json!({
+            "port": "COM_SER2MCP_NONEXISTENT",
+            "data": "x",
+            "mode": "text",
+            "timeout_ms": 300001
+        }),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "uart_exchange timeout_ms 超上限应触发 invalid_params"
+    );
+
     client.cancel().await.expect("关闭客户端失败");
 }
 

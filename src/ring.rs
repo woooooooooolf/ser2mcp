@@ -13,6 +13,9 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 
+/// 环形缓冲允许的最大容量，避免外部参数导致进程级 OOM。
+pub const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+
 /// 环形缓冲（线程安全包装）。
 #[derive(Debug)]
 pub struct RingBuf {
@@ -21,8 +24,9 @@ pub struct RingBuf {
 }
 
 impl RingBuf {
-    /// 创建指定容量的环形缓冲。
+    /// 创建指定容量的环形缓冲；容量会限制在 1..=`MAX_BUFFER_SIZE`。
     pub fn new(capacity: usize) -> Arc<Self> {
+        let capacity = capacity.clamp(1, MAX_BUFFER_SIZE);
         Arc::new(Self {
             inner: Mutex::new(RingBuffer::new(capacity)),
             notify: Notify::new(),

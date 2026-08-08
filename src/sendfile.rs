@@ -13,6 +13,8 @@ pub const BASE64_LINE_WIDTH: usize = 76;
 /// 默认分片大小（字节）：保守默认值（宁小勿大）。
 /// 模型应依据对端 tty 缓冲限制与波特率显式覆盖（见工具描述）。
 pub const DEFAULT_CHUNK_SIZE: usize = 256;
+/// 分片允许的最大原始字节数，避免用户参数导致进程级 OOM。
+pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// 发送编码模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,7 @@ pub fn estimate(
     gap_ms: u64,
     baudrate: u32,
 ) -> Estimate {
+    let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
     let chunks = file_size.div_ceil(chunk_size.max(1) as u64);
     let (sent_bytes, formula) = match mode {
         SendMode::Text => (
@@ -124,8 +127,9 @@ pub struct ChunkIter {
 }
 
 impl ChunkIter {
-    /// 创建分片迭代器（`chunk_size` 最小为 1）。
+    /// 创建分片迭代器（`chunk_size` 限制在 1..=`MAX_CHUNK_SIZE`）。
     pub fn new(file: File, mode: SendMode, chunk_size: usize) -> Self {
+        let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
         Self {
             file,
             mode,
