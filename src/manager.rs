@@ -551,6 +551,31 @@ impl SerialManager {
         write_locked(&ap.port, data)
     }
 
+    /// 原子完成一次写入和读取：整个交换过程持有同一个 `io_lock`，避免并发工具调用
+    /// 在写入和读取之间插入并导致响应错配。
+    pub async fn exchange(
+        &self,
+        port_name: &str,
+        data: &[u8],
+        idle_ms: u64,
+        max_bytes: usize,
+        timeout_ms: u64,
+    ) -> Result<(usize, ReadOutcome), String> {
+        let _guard = self.io_lock.lock().await;
+        let (buffer, last_overflow, port) = {
+            let ports = self.ports.lock().unwrap();
+            let ap = ports
+                .get(port_name)
+                .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
+        };
+        let written = write_locked(&port, data)?;
+        let outcome = self
+            .read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
+            .await?;
+        Ok((written, outcome))
+    }
+
     /// 流式发送文件内容（分片 + 可选片间间隔），全程持有 `io_lock`，期间其它
     /// 写/配置/期待工具调用排队；`uart_available` 不受影响，可随时查询进度。
     ///
@@ -801,6 +826,19 @@ impl SerialManager {
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
+        self.read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
+            .await
+    }
+
+    async fn read_locked(
+        &self,
+        buffer: Arc<RingBuf>,
+        last_overflow: Arc<Mutex<u64>>,
+        port: Arc<Mutex<Box<dyn SerialPort>>>,
+        idle_ms: u64,
+        max_bytes: usize,
+        timeout_ms: u64,
+    ) -> Result<ReadOutcome, String> {
         let idle = Duration::from_millis(idle_ms);
         let timeout = Duration::from_millis(timeout_ms);
         let start = Instant::now();
@@ -955,6 +993,9 @@ fn write_locked(port: &Arc<Mutex<Box<dyn SerialPort>>>, data: &[u8]) -> Result<u
         let n = p
             .write(&data[written..])
             .map_err(|e| format!("写入失败: {e}"))?;
+        if n == 0 {
+            return Err("写入失败: 串口返回 0 字节".into());
+        }
         written += n;
     }
     p.flush().map_err(|e| format!("flush 失败: {e}"))?;

@@ -890,28 +890,25 @@ impl Ser2Mcp {
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        match self.manager.write(&args.port, &data).await {
-            Ok(written) => match self
-                .manager
-                .read(&args.port, idle_ms, max_bytes, timeout_ms)
-                .await
-            {
-                Ok(outcome) => {
-                    let (resp, used_mode) = encode_recv(&outcome.data, &read_mode);
-                    Ok(CallToolResult::structured(json!({
-                        "written": written,
-                        "data": resp,
-                        "bytes": outcome.data.len(),
-                        "mode": used_mode,
-                        "newline": newline,
-                        "reason": read_reason_str(outcome.reason),
-                        "overflow_delta": outcome.overflow_delta,
-                        "overflow_total": outcome.overflow_total,
-                        "buffered_bytes": outcome.buffered,
-                    })))
-                }
-                Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
-            },
+        match self
+            .manager
+            .exchange(&args.port, &data, idle_ms, max_bytes, timeout_ms)
+            .await
+        {
+            Ok((written, outcome)) => {
+                let (resp, used_mode) = encode_recv(&outcome.data, &read_mode);
+                Ok(CallToolResult::structured(json!({
+                    "written": written,
+                    "data": resp,
+                    "bytes": outcome.data.len(),
+                    "mode": used_mode,
+                    "newline": newline,
+                    "reason": read_reason_str(outcome.reason),
+                    "overflow_delta": outcome.overflow_delta,
+                    "overflow_total": outcome.overflow_total,
+                    "buffered_bytes": outcome.buffered,
+                })))
+            }
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
