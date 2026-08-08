@@ -15,6 +15,8 @@ use tokio::sync::Notify;
 
 /// 环形缓冲允许的最大容量，避免外部参数导致进程级 OOM。
 pub const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+/// 条件匹配允许的最大 pattern 大小，避免搜索占用过多 CPU。
+pub const MAX_PATTERN_SIZE: usize = 64 * 1024;
 
 /// 环形缓冲（线程安全包装）。
 #[derive(Debug)]
@@ -210,7 +212,7 @@ fn find_in(inner: &RingBuffer, pattern: &[u8]) -> Option<usize> {
     if pattern.is_empty() {
         return Some(0);
     }
-    if pattern.len() > inner.len {
+    if pattern.len() > MAX_PATTERN_SIZE || pattern.len() > inner.len {
         return None;
     }
     let tail = inner.tail();
@@ -220,22 +222,38 @@ fn find_in(inner: &RingBuffer, pattern: &[u8]) -> Option<usize> {
         &inner.data[..inner.len - first],
     );
     let m = pattern.len();
-    for start in 0..=inner.len - m {
-        let mut ok = true;
-        for (k, &pb) in pattern.iter().enumerate() {
-            let idx = start + k;
-            let b = if idx < first {
-                seg1[idx]
-            } else {
-                seg2[idx - first]
-            };
-            if b != pb {
-                ok = false;
-                break;
-            }
+
+    // KMP 前缀表使跨环形缓冲边界的搜索保持 O(n + m)，避免重复比较退化。
+    let mut prefix = vec![0usize; m];
+    let mut prefix_len = 0;
+    for i in 1..m {
+        while prefix_len > 0 && pattern[i] != pattern[prefix_len] {
+            prefix_len = prefix[prefix_len - 1];
         }
-        if ok {
-            return Some(start);
+        if pattern[i] == pattern[prefix_len] {
+            prefix_len += 1;
+        }
+        prefix[i] = prefix_len;
+    }
+
+    let byte_at = |idx: usize| {
+        if idx < first {
+            seg1[idx]
+        } else {
+            seg2[idx - first]
+        }
+    };
+    let mut matched = 0;
+    for pos in 0..inner.len {
+        let byte = byte_at(pos);
+        while matched > 0 && byte != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if byte == pattern[matched] {
+            matched += 1;
+            if matched == m {
+                return Some(pos + 1 - m);
+            }
         }
     }
     None

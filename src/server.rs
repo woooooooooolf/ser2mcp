@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::hex;
 use crate::manager::{
     self, DEFAULT_BUFFER_SIZE, DEFAULT_IDLE_MS, DEFAULT_MAX_BYTES, DEFAULT_READ_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS, MAX_BUFFER_SIZE, PortConfig, ReadReason, SerialManager,
+    DEFAULT_TIMEOUT_MS, MAX_BUFFER_SIZE, MAX_PATTERN_SIZE, PortConfig, ReadReason, SerialManager,
 };
 use crate::sendfile;
 
@@ -379,6 +379,16 @@ fn validate_read_timeout(value: u64) -> Result<(), McpError> {
                 "timeout_ms exceeds the limit of {}ms",
                 manager::MAX_READ_TIMEOUT_MS
             ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pattern_size(value: &[u8]) -> Result<(), McpError> {
+    if value.len() > MAX_PATTERN_SIZE {
+        return Err(McpError::invalid_params(
+            format!("pattern exceeds the limit of {MAX_PATTERN_SIZE} bytes"),
             None,
         ));
     }
@@ -933,6 +943,7 @@ impl Ser2Mcp {
             Ok(p) => p,
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
+        validate_pattern_size(&pattern)?;
         if pattern.is_empty() {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
@@ -1003,6 +1014,7 @@ impl Ser2Mcp {
         if pattern.is_empty() {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
+        validate_pattern_size(&pattern)?;
         let reply_mode = args.reply_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_send_mode(&reply_mode) {
             return Err(McpError::invalid_params(e, None));

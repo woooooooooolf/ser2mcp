@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use tokio_util::sync::CancellationToken;
 
-pub use crate::ring::MAX_BUFFER_SIZE;
 use crate::ring::RingBuf;
+pub use crate::ring::{MAX_BUFFER_SIZE, MAX_PATTERN_SIZE};
 
 /// 默认波特率（115200）。
 pub const DEFAULT_BAUDRATE: u32 = 115200;
