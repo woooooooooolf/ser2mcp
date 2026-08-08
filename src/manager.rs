@@ -319,7 +319,9 @@ impl SendState {
     /// 等待当前发送退出。仅应在已 `cancel()` 且 `is_active()` 为 true 时调用；
     /// tokio Notify 会保留已发出的通知（permit），不会错过退出瞬间。
     async fn wait_done(&self) {
-        self.done.notified().await;
+        while self.is_active() {
+            self.done.notified().await;
+        }
     }
 }
 
@@ -360,6 +362,8 @@ struct ActivePort {
     last_overflow: Arc<Mutex<u64>>,
     /// 文件发送会话状态（进度/取消/完成通知）。
     send: Arc<SendState>,
+    /// 关闭已开始；阻止新的文件发送会话在关闭等待期间插入。
+    closing: AtomicBool,
 }
 
 /// 串口管理器。
@@ -463,6 +467,11 @@ impl SerialManager {
             .map_err(|e| format!("启动读线程失败: {e}"))?;
 
         let mut ports = self.ports.lock().unwrap();
+        if ports.contains_key(port_name) {
+            reader_stop.signal();
+            let _ = reader.join();
+            return Err(format!("端口 {port_name} 已打开，请先调用 uart_close"));
+        }
         ports.insert(
             port_name.to_string(),
             ActivePort {
@@ -483,6 +492,7 @@ impl SerialManager {
                 read_error,
                 last_overflow: Arc::new(Mutex::new(0)),
                 send: Arc::new(SendState::new()),
+                closing: AtomicBool::new(false),
             },
         );
         Ok(())
@@ -594,13 +604,21 @@ impl SerialManager {
         ct: Option<&CancellationToken>,
     ) -> Result<SendFileOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (port, last_overflow, send) = {
+        let (port, last_overflow, send, closing) = {
             let ports = self.ports.lock().unwrap();
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-            (ap.port.clone(), ap.last_overflow.clone(), ap.send.clone())
+            (
+                ap.port.clone(),
+                ap.last_overflow.clone(),
+                ap.send.clone(),
+                ap.closing.load(Ordering::SeqCst),
+            )
         };
+        if closing {
+            return Err(format!("端口 {port_name} 正在关闭"));
+        }
         let overflow_before = *last_overflow.lock().unwrap();
         let started = Instant::now();
         send.begin(total_bytes);
@@ -609,7 +627,7 @@ impl SerialManager {
         let mut reason = "completed";
         let mut device_error: Option<String> = None;
         let mut chunks = chunks;
-        loop {
+        'send: loop {
             let chunk = match chunks.next() {
                 None => break,
                 Some(Ok(c)) => c,
@@ -653,15 +671,26 @@ impl SerialManager {
                 }
             }
             if gap_ms > 0 {
-                let sleep = tokio::time::sleep(Duration::from_millis(gap_ms));
-                if let Some(ct) = ct {
-                    // 片间间隔期间也要响应取消（gap 可能较大）。
-                    tokio::select! {
-                        _ = ct.cancelled() => { reason = "cancelled"; break; }
-                        _ = sleep => {}
+                let gap = Duration::from_millis(gap_ms);
+                let gap_start = Instant::now();
+                loop {
+                    if send.is_cancelled() || ct.is_some_and(|c| c.is_cancelled()) {
+                        reason = "cancelled";
+                        break 'send;
                     }
-                } else {
-                    sleep.await;
+                    let elapsed = gap_start.elapsed();
+                    if elapsed >= gap {
+                        break;
+                    }
+                    let wait = (gap - elapsed).min(POLL_INTERVAL);
+                    if let Some(ct) = ct {
+                        tokio::select! {
+                            _ = ct.cancelled() => { reason = "cancelled"; break 'send; }
+                            _ = tokio::time::sleep(wait) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(wait).await;
+                    }
                 }
             }
         }
@@ -944,7 +973,10 @@ impl SerialManager {
     pub async fn close(&self, port_name: &str) -> Result<(), String> {
         let send = {
             let ports = self.ports.lock().unwrap();
-            ports.get(port_name).map(|ap| ap.send.clone())
+            ports.get(port_name).map(|ap| {
+                ap.closing.store(true, Ordering::SeqCst);
+                ap.send.clone()
+            })
         };
         if let Some(send) = send {
             if send.is_active() {
@@ -952,6 +984,9 @@ impl SerialManager {
                 tokio::select! {
                     _ = send.wait_done() => {}
                     _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if let Some(ap) = self.ports.lock().unwrap().get(port_name) {
+                            ap.closing.store(false, Ordering::SeqCst);
+                        }
                         return Err(format!(
                             "端口 {port_name} 的文件发送未在 30s 内退出，关闭中止"
                         ));
@@ -959,6 +994,7 @@ impl SerialManager {
                 }
             }
         }
+        let _io_guard = self.io_lock.lock().await;
         let ap = self
             .ports
             .lock()
