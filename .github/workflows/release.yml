@@ -53,11 +53,20 @@ jobs:
         run: |
           VERSION="V${{ steps.version.outputs.version }}"
           PKG="release/${{ matrix.artifact }}-$VERSION"
-          mkdir -p "$PKG/docs"
+          mkdir -p "$PKG/docs" "$PKG/bin"
           if [ -f target/release/ser2mcp.exe ]; then
             cp target/release/ser2mcp.exe "$PKG/"
+            cp target/release/ser2mcp.exe "$PKG/bin/"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            cp target/release/ser2mcp "$PKG/"
+            cp target/release/ser2mcp "$PKG/bin/ser2mcp-macos"
           else
             cp target/release/ser2mcp "$PKG/"
+            cp target/release/ser2mcp "$PKG/bin/ser2mcp"
+          fi
+          cp bin/ser2mcp.cmd "$PKG/bin/"
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            chmod +x "$PKG/bin/ser2mcp.cmd" "$PKG/bin/ser2mcp"*
           fi
           cp README.md README.en.md LICENSE-MIT LICENSE-APACHE "$PKG/"
           cp reasonix-plugin.json "$PKG/"

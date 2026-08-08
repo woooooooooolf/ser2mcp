@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- 修正 `uart_send_estimate.est_chunks` 在 base64 模式下未计入跨分片编码收尾/末尾换行片的问题，使估算片数与 `uart_send_file.chunks` 一致
+- 同步 MCP schema、INSTRUCTIONS、README 与 SKILL 的资源上限、全局 I/O 临界区、base64 连续编码、发送取消和对账语义，移除会误判完整性或数据不丢失的表述
+- Release 包补齐 `reasonix-plugin.json` 所需的 `bin/ser2mcp.cmd` 与平台二进制目录结构，使解压后的产物可作为 Reasonix 插件离线安装
+
 ## [0.8.1] - 2026-08-08
 
 ### Fixed
@@ -175,3 +183,4 @@
 [0.7.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.7.0
 [0.8.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.0
 [0.8.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.1
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.1...HEAD
