@@ -22,6 +22,7 @@ use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use tokio_util::sync::CancellationToken;
 
 use crate::ring::RingBuf;
+pub use crate::ring::{MAX_BUFFER_SIZE, MAX_PATTERN_SIZE};
 
 /// 默认波特率（115200）。
 pub const DEFAULT_BAUDRATE: u32 = 115200;
@@ -42,6 +43,8 @@ pub const DEFAULT_IDLE_MS: u64 = 300;
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// 默认总等待超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+/// 读取/交换工具允许的最大总等待时间（毫秒，5 分钟）。
+pub const MAX_READ_TIMEOUT_MS: u64 = 300_000;
 /// `uart_expect` / `uart_expect_send` 的 `timeout_ms` 上限（毫秒，5 分钟）。
 ///
 /// expect 持有 `io_lock` 直到超时返回，期间其它工具调用全部排队；
@@ -316,7 +319,9 @@ impl SendState {
     /// 等待当前发送退出。仅应在已 `cancel()` 且 `is_active()` 为 true 时调用；
     /// tokio Notify 会保留已发出的通知（permit），不会错过退出瞬间。
     async fn wait_done(&self) {
-        self.done.notified().await;
+        while self.is_active() {
+            self.done.notified().await;
+        }
     }
 }
 
@@ -357,6 +362,8 @@ struct ActivePort {
     last_overflow: Arc<Mutex<u64>>,
     /// 文件发送会话状态（进度/取消/完成通知）。
     send: Arc<SendState>,
+    /// 关闭已开始；阻止新的文件发送会话在关闭等待期间插入。
+    closing: AtomicBool,
 }
 
 /// 串口管理器。
@@ -460,6 +467,11 @@ impl SerialManager {
             .map_err(|e| format!("启动读线程失败: {e}"))?;
 
         let mut ports = self.ports.lock().unwrap();
+        if ports.contains_key(port_name) {
+            reader_stop.signal();
+            let _ = reader.join();
+            return Err(format!("端口 {port_name} 已打开，请先调用 uart_close"));
+        }
         ports.insert(
             port_name.to_string(),
             ActivePort {
@@ -480,6 +492,7 @@ impl SerialManager {
                 read_error,
                 last_overflow: Arc::new(Mutex::new(0)),
                 send: Arc::new(SendState::new()),
+                closing: AtomicBool::new(false),
             },
         );
         Ok(())
@@ -548,6 +561,31 @@ impl SerialManager {
         write_locked(&ap.port, data)
     }
 
+    /// 原子完成一次写入和读取：整个交换过程持有同一个 `io_lock`，避免并发工具调用
+    /// 在写入和读取之间插入并导致响应错配。
+    pub async fn exchange(
+        &self,
+        port_name: &str,
+        data: &[u8],
+        idle_ms: u64,
+        max_bytes: usize,
+        timeout_ms: u64,
+    ) -> Result<(usize, ReadOutcome), String> {
+        let _guard = self.io_lock.lock().await;
+        let (buffer, last_overflow, port) = {
+            let ports = self.ports.lock().unwrap();
+            let ap = ports
+                .get(port_name)
+                .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
+        };
+        let written = write_locked(&port, data)?;
+        let outcome = self
+            .read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
+            .await?;
+        Ok((written, outcome))
+    }
+
     /// 流式发送文件内容（分片 + 可选片间间隔），全程持有 `io_lock`，期间其它
     /// 写/配置/期待工具调用排队；`uart_available` 不受影响，可随时查询进度。
     ///
@@ -566,13 +604,21 @@ impl SerialManager {
         ct: Option<&CancellationToken>,
     ) -> Result<SendFileOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (port, last_overflow, send) = {
+        let (port, last_overflow, send, closing) = {
             let ports = self.ports.lock().unwrap();
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-            (ap.port.clone(), ap.last_overflow.clone(), ap.send.clone())
+            (
+                ap.port.clone(),
+                ap.last_overflow.clone(),
+                ap.send.clone(),
+                ap.closing.load(Ordering::SeqCst),
+            )
         };
+        if closing {
+            return Err(format!("端口 {port_name} 正在关闭"));
+        }
         let overflow_before = *last_overflow.lock().unwrap();
         let started = Instant::now();
         send.begin(total_bytes);
@@ -581,7 +627,7 @@ impl SerialManager {
         let mut reason = "completed";
         let mut device_error: Option<String> = None;
         let mut chunks = chunks;
-        loop {
+        'send: loop {
             let chunk = match chunks.next() {
                 None => break,
                 Some(Ok(c)) => c,
@@ -625,15 +671,26 @@ impl SerialManager {
                 }
             }
             if gap_ms > 0 {
-                let sleep = tokio::time::sleep(Duration::from_millis(gap_ms));
-                if let Some(ct) = ct {
-                    // 片间间隔期间也要响应取消（gap 可能较大）。
-                    tokio::select! {
-                        _ = ct.cancelled() => { reason = "cancelled"; break; }
-                        _ = sleep => {}
+                let gap = Duration::from_millis(gap_ms);
+                let gap_start = Instant::now();
+                loop {
+                    if send.is_cancelled() || ct.is_some_and(|c| c.is_cancelled()) {
+                        reason = "cancelled";
+                        break 'send;
                     }
-                } else {
-                    sleep.await;
+                    let elapsed = gap_start.elapsed();
+                    if elapsed >= gap {
+                        break;
+                    }
+                    let wait = (gap - elapsed).min(POLL_INTERVAL);
+                    if let Some(ct) = ct {
+                        tokio::select! {
+                            _ = ct.cancelled() => { reason = "cancelled"; break 'send; }
+                            _ = tokio::time::sleep(wait) => {}
+                        }
+                    } else {
+                        tokio::time::sleep(wait).await;
+                    }
                 }
             }
         }
@@ -798,6 +855,19 @@ impl SerialManager {
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
+        self.read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
+            .await
+    }
+
+    async fn read_locked(
+        &self,
+        buffer: Arc<RingBuf>,
+        last_overflow: Arc<Mutex<u64>>,
+        port: Arc<Mutex<Box<dyn SerialPort>>>,
+        idle_ms: u64,
+        max_bytes: usize,
+        timeout_ms: u64,
+    ) -> Result<ReadOutcome, String> {
         let idle = Duration::from_millis(idle_ms);
         let timeout = Duration::from_millis(timeout_ms);
         let start = Instant::now();
@@ -903,7 +973,10 @@ impl SerialManager {
     pub async fn close(&self, port_name: &str) -> Result<(), String> {
         let send = {
             let ports = self.ports.lock().unwrap();
-            ports.get(port_name).map(|ap| ap.send.clone())
+            ports.get(port_name).map(|ap| {
+                ap.closing.store(true, Ordering::SeqCst);
+                ap.send.clone()
+            })
         };
         if let Some(send) = send {
             if send.is_active() {
@@ -911,6 +984,9 @@ impl SerialManager {
                 tokio::select! {
                     _ = send.wait_done() => {}
                     _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if let Some(ap) = self.ports.lock().unwrap().get(port_name) {
+                            ap.closing.store(false, Ordering::SeqCst);
+                        }
                         return Err(format!(
                             "端口 {port_name} 的文件发送未在 30s 内退出，关闭中止"
                         ));
@@ -918,6 +994,7 @@ impl SerialManager {
                 }
             }
         }
+        let _io_guard = self.io_lock.lock().await;
         let ap = self
             .ports
             .lock()
@@ -952,6 +1029,9 @@ fn write_locked(port: &Arc<Mutex<Box<dyn SerialPort>>>, data: &[u8]) -> Result<u
         let n = p
             .write(&data[written..])
             .map_err(|e| format!("写入失败: {e}"))?;
+        if n == 0 {
+            return Err("写入失败: 串口返回 0 字节".into());
+        }
         written += n;
     }
     p.flush().map_err(|e| format!("flush 失败: {e}"))?;

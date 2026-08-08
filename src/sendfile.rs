@@ -13,6 +13,8 @@ pub const BASE64_LINE_WIDTH: usize = 76;
 /// 默认分片大小（字节）：保守默认值（宁小勿大）。
 /// 模型应依据对端 tty 缓冲限制与波特率显式覆盖（见工具描述）。
 pub const DEFAULT_CHUNK_SIZE: usize = 256;
+/// 分片允许的最大原始字节数，避免用户参数导致进程级 OOM。
+pub const MAX_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// 发送编码模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,7 @@ pub fn estimate(
     gap_ms: u64,
     baudrate: u32,
 ) -> Estimate {
+    let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
     let chunks = file_size.div_ceil(chunk_size.max(1) as u64);
     let (sent_bytes, formula) = match mode {
         SendMode::Text => (
@@ -117,18 +120,22 @@ pub struct ChunkIter {
     chunk_size: usize,
     /// base64 模式下当前行已输出的字符数（跨片连续）。
     line_pos: usize,
+    /// base64 模式下尚未凑满 3 字节的尾部，跨原始文件分片保留。
+    base64_tail: Vec<u8>,
     buf: Vec<u8>,
     done: bool,
 }
 
 impl ChunkIter {
-    /// 创建分片迭代器（`chunk_size` 最小为 1）。
+    /// 创建分片迭代器（`chunk_size` 限制在 1..=`MAX_CHUNK_SIZE`）。
     pub fn new(file: File, mode: SendMode, chunk_size: usize) -> Self {
+        let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
         Self {
             file,
             mode,
             chunk_size: chunk_size.max(1),
             line_pos: 0,
+            base64_tail: Vec::with_capacity(2),
             buf: Vec::with_capacity(chunk_size),
             done: false,
         }
@@ -159,9 +166,8 @@ impl ChunkIter {
         }
     }
 
-    /// base64 编码并按行宽断行（跨片连续计数行位置）。
-    fn encode_chunk(&mut self, raw: &[u8]) -> Vec<u8> {
-        let enc = STANDARD.encode(raw);
+    /// 对不含 padding 的完整 base64 输入编码并按行宽断行。
+    fn wrap_base64(&mut self, enc: &str) -> Vec<u8> {
         let mut out = Vec::with_capacity(enc.len() + enc.len() / BASE64_LINE_WIDTH + 1);
         for b in enc.bytes() {
             if self.line_pos >= BASE64_LINE_WIDTH {
@@ -170,6 +176,36 @@ impl ChunkIter {
             }
             out.push(b);
             self.line_pos += 1;
+        }
+        out
+    }
+
+    /// base64 编码一个原始分片，同时把 1-2 个尾部字节保留到下一分片。
+    /// 这样 padding 只会出现在整个文件的末尾，而不会出现在分片中间。
+    fn encode_chunk(&mut self, raw: &[u8]) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.base64_tail);
+        input.extend_from_slice(raw);
+        let complete_len = input.len() / 3 * 3;
+        self.base64_tail = input[complete_len..].to_vec();
+        if complete_len == 0 {
+            return Vec::new();
+        }
+        let enc = STANDARD.encode(&input[..complete_len]);
+        self.wrap_base64(&enc)
+    }
+
+    /// 编码文件尾部并补齐最后一行换行。
+    fn finish_base64(&mut self) -> Vec<u8> {
+        let mut out = if self.base64_tail.is_empty() {
+            Vec::new()
+        } else {
+            let tail = std::mem::take(&mut self.base64_tail);
+            let enc = STANDARD.encode(tail);
+            self.wrap_base64(&enc)
+        };
+        if self.line_pos > 0 {
+            out.push(b'\n');
+            self.line_pos = 0;
         }
         out
     }
@@ -182,27 +218,32 @@ impl Iterator for ChunkIter {
         if self.done {
             return None;
         }
-        let raw = match self.read_full() {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                // EOF：base64 模式最后一行未以换行收尾时补一个 `\n`。
-                if self.mode == SendMode::Base64 && self.line_pos > 0 {
+        loop {
+            let raw = match self.read_full() {
+                Ok(Some(v)) => v,
+                Ok(None) => {
                     self.done = true;
-                    return Some(Ok(vec![b'\n']));
+                    return match self.mode {
+                        SendMode::Text => None,
+                        SendMode::Base64 => {
+                            let tail = self.finish_base64();
+                            (!tail.is_empty()).then_some(Ok(tail))
+                        }
+                    };
                 }
-                self.done = true;
-                return None;
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            };
+            let chunk = match self.mode {
+                SendMode::Text => raw,
+                SendMode::Base64 => self.encode_chunk(&raw),
+            };
+            if !chunk.is_empty() {
+                return Some(Ok(chunk));
             }
-            Err(e) => {
-                self.done = true;
-                return Some(Err(e));
-            }
-        };
-        let chunk = match self.mode {
-            SendMode::Text => raw,
-            SendMode::Base64 => self.encode_chunk(&raw),
-        };
-        Some(Ok(chunk))
+        }
     }
 }
 
@@ -272,6 +313,20 @@ mod tests {
             assert!(line.len() <= BASE64_LINE_WIDTH);
         }
         // 解码（去掉换行后）与原始一致。
+        let stripped: Vec<u8> = out.into_iter().filter(|&b| b != b'\n').collect();
+        let decoded = STANDARD.decode(stripped).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn base64_roundtrip_with_non_multiple_of_three_chunks() {
+        // 默认 chunk_size=256 不是 3 的倍数，padding 只能出现在整个文件末尾。
+        let data: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+        let out: Vec<u8> = chunks_of(&data, SendMode::Base64, 256)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(out.ends_with(b"\n"));
         let stripped: Vec<u8> = out.into_iter().filter(|&b| b != b'\n').collect();
         let decoded = STANDARD.decode(stripped).unwrap();
         assert_eq!(decoded, data);

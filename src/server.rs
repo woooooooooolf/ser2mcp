@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::hex;
 use crate::manager::{
     self, DEFAULT_BUFFER_SIZE, DEFAULT_IDLE_MS, DEFAULT_MAX_BYTES, DEFAULT_READ_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS, PortConfig, ReadReason, SerialManager,
+    DEFAULT_TIMEOUT_MS, MAX_BUFFER_SIZE, MAX_PATTERN_SIZE, PortConfig, ReadReason, SerialManager,
 };
 use crate::sendfile;
 
@@ -349,6 +349,52 @@ fn require_port(port: &str) -> Result<(), McpError> {
     }
 }
 
+fn validate_buffer_size(value: usize) -> Result<(), McpError> {
+    if value == 0 || value > MAX_BUFFER_SIZE {
+        return Err(McpError::invalid_params(
+            format!("buffer_size must be in 1..={MAX_BUFFER_SIZE} bytes"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_chunk_size(value: usize) -> Result<(), McpError> {
+    if value == 0 || value > sendfile::MAX_CHUNK_SIZE {
+        return Err(McpError::invalid_params(
+            format!(
+                "chunk_size must be in 1..={} bytes",
+                sendfile::MAX_CHUNK_SIZE
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_read_timeout(value: u64) -> Result<(), McpError> {
+    if value > manager::MAX_READ_TIMEOUT_MS {
+        return Err(McpError::invalid_params(
+            format!(
+                "timeout_ms exceeds the limit of {}ms",
+                manager::MAX_READ_TIMEOUT_MS
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pattern_size(value: &[u8]) -> Result<(), McpError> {
+    if value.len() > MAX_PATTERN_SIZE {
+        return Err(McpError::invalid_params(
+            format!("pattern exceeds the limit of {MAX_PATTERN_SIZE} bytes"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// 校验发送文件：path 非空、存在、是普通文件、可读；返回文件字节数。
 fn send_file_meta(path: &str) -> Result<u64, String> {
     if path.trim().is_empty() {
@@ -535,6 +581,7 @@ impl Ser2Mcp {
         };
         let read_timeout_ms = args.read_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
         let buffer_size = args.buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE);
+        validate_buffer_size(buffer_size)?;
         let discard_on_open = args.discard_on_open.unwrap_or(true);
 
         match self.manager.open(
@@ -665,7 +712,10 @@ impl Ser2Mcp {
         let chunk_size = match args.chunk_size {
             None => sendfile::DEFAULT_CHUNK_SIZE,
             Some(0) => return Err(McpError::invalid_params("chunk_size 必须 ≥ 1", None)),
-            Some(v) => v,
+            Some(v) => {
+                validate_chunk_size(v)?;
+                v
+            }
         };
         let gap_ms = args.gap_ms.unwrap_or(0);
         if gap_ms > manager::MAX_SEND_GAP_MS {
@@ -711,7 +761,10 @@ impl Ser2Mcp {
         let chunk_size = match args.chunk_size {
             None => sendfile::DEFAULT_CHUNK_SIZE,
             Some(0) => return Err(McpError::invalid_params("chunk_size 必须 ≥ 1", None)),
-            Some(v) => v,
+            Some(v) => {
+                validate_chunk_size(v)?;
+                v
+            }
         };
         let gap_ms = args.gap_ms.unwrap_or(0);
         if gap_ms > manager::MAX_SEND_GAP_MS {
@@ -788,6 +841,7 @@ impl Ser2Mcp {
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        validate_read_timeout(timeout_ms)?;
         let mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&mode) {
             return Err(McpError::invalid_params(e, None));
@@ -841,32 +895,30 @@ impl Ser2Mcp {
         let idle_ms = args.idle_ms.unwrap_or(DEFAULT_IDLE_MS);
         let max_bytes = args.max_bytes.unwrap_or(DEFAULT_MAX_BYTES).max(1);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+        validate_read_timeout(timeout_ms)?;
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
-        match self.manager.write(&args.port, &data).await {
-            Ok(written) => match self
-                .manager
-                .read(&args.port, idle_ms, max_bytes, timeout_ms)
-                .await
-            {
-                Ok(outcome) => {
-                    let (resp, used_mode) = encode_recv(&outcome.data, &read_mode);
-                    Ok(CallToolResult::structured(json!({
-                        "written": written,
-                        "data": resp,
-                        "bytes": outcome.data.len(),
-                        "mode": used_mode,
-                        "newline": newline,
-                        "reason": read_reason_str(outcome.reason),
-                        "overflow_delta": outcome.overflow_delta,
-                        "overflow_total": outcome.overflow_total,
-                        "buffered_bytes": outcome.buffered,
-                    })))
-                }
-                Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
-            },
+        match self
+            .manager
+            .exchange(&args.port, &data, idle_ms, max_bytes, timeout_ms)
+            .await
+        {
+            Ok((written, outcome)) => {
+                let (resp, used_mode) = encode_recv(&outcome.data, &read_mode);
+                Ok(CallToolResult::structured(json!({
+                    "written": written,
+                    "data": resp,
+                    "bytes": outcome.data.len(),
+                    "mode": used_mode,
+                    "newline": newline,
+                    "reason": read_reason_str(outcome.reason),
+                    "overflow_delta": outcome.overflow_delta,
+                    "overflow_total": outcome.overflow_total,
+                    "buffered_bytes": outcome.buffered,
+                })))
+            }
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
@@ -891,6 +943,7 @@ impl Ser2Mcp {
             Ok(p) => p,
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
+        validate_pattern_size(&pattern)?;
         if pattern.is_empty() {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
@@ -961,6 +1014,7 @@ impl Ser2Mcp {
         if pattern.is_empty() {
             return Err(McpError::invalid_params("pattern 不能为空", None));
         }
+        validate_pattern_size(&pattern)?;
         let reply_mode = args.reply_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_send_mode(&reply_mode) {
             return Err(McpError::invalid_params(e, None));
