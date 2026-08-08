@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] - 2026-08-08
+
+### Fixed
+
+- 修复 `uart_send_file` 的 base64 流式编码在原始分片大小不是 3 的倍数时，会在分片中间产生 padding、导致对端无法将完整文件作为单一 base64 数据解码的问题；现在跨分片保留 1–2 个尾字节，仅在文件末尾补齐 padding
+- 修复 `uart_exchange` 的写入与读取之间可能被并发工具调用插入、造成命令响应错配的问题；交换过程现在持有同一 I/O 临界区，并完整处理部分写入和异常零字节写入
+- 修复 `uart_close` 与活动中的 `uart_send_file` 并发时，端口生命周期可能先于发送循环结束的问题；关闭过程现在先标记关闭、请求取消并等待发送退出，再停止读线程和释放端口
+- 为缓冲区、文件分片、读取/匹配超时、片间间隔及 expect pattern 增加资源上限，避免异常参数造成过量内存占用或长期阻塞
+- 将 expect pattern 搜索改为有界 KMP 线性搜索，并原子完成匹配与消费，避免重复比较退化及并发覆盖窗口
+
 ## [0.8.0] - 2026-08-07
 
 ### Changed
@@ -163,3 +173,5 @@
 [0.5.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.5.1
 [0.6.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.6.0
 [0.7.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.7.0
+[0.8.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.0
+[0.8.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.1
