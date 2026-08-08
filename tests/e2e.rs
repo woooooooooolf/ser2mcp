@@ -455,6 +455,7 @@ async fn e2e_send_file_params_and_errors() {
     assert_eq!(v["mode"], json!("base64"));
     let sent = v["est_sent_bytes"].as_u64().unwrap();
     assert!(sent > file_size, "base64 应膨胀: {sent} vs {file_size}");
+    assert_eq!(v["est_chunks"], json!(2), "编码片后还应有末尾换行片");
 
     // 3. uart_send_estimate 文件不存在 → 协议级 invalid_params
     let r = call(

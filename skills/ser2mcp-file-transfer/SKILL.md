@@ -27,9 +27,9 @@ description: 串口文件流式发送指南：uart_send_estimate/uart_send_file/
 |---|---|
 | `port` | 串口名（必填） |
 | `path` | 本地文件路径（必填；服务器校验存在、是普通文件、可读） |
-| `mode` | `text`（默认，原样按字节发）/ `base64`（编码后发，每 76 字符自动换行、末尾补 `\n`） |
-| `chunk_size` | 分片大小（原始字节），默认 256。**模型的责任**：宁小勿大——无流控下超限即丢字节且不可恢复 |
-| `gap_ms` | 片间间隔（毫秒），默认 0（每片写完 flush 已天然限速到波特率上限） |
+| `mode` | `text`（默认，原样按字节发）/ `base64`（跨原始分片连续编码，padding 仅在文件末尾；每 76 字符自动换行、末尾补 `\n`） |
+| `chunk_size` | 分片大小（原始字节），默认 256，范围 1..=1 MiB。**模型的责任**：宁小勿大——无流控下超限即丢字节且不可恢复 |
+| `gap_ms` | 片间间隔（毫秒），默认 0，上限 60000（每片写完 flush 已天然限速到波特率上限） |
 
 **chunk_size 选择**：先查对端 tty 缓冲限制（如板端 `stty -a` 看 `icanon`/行缓冲）与波特率，选 `chunk_size` ≤ 缓冲上限。**base64 模式实际发送 ≈ 文件字节数 × 4/3 + 换行**（每 76 字符一行），按对端缓冲 ÷1.34 取整。
 
@@ -40,9 +40,9 @@ description: 串口文件流式发送指南：uart_send_estimate/uart_send_file/
 - `reason="completed"`：全部发完。
 - `reason="cancelled"`：被 `uart_send_cancel`、`uart_close` 或客户端取消通知（`notifications/cancelled`）中止——按 `sent_bytes` 对账后决定是否重发。
 - `reason="device_error"`：读线程检测到致命错误（串口物理断开/硬件故障）——写侧可能仍"假成功"（数据进驱动缓冲但设备已不在），**以此为准**并做对端对账；`device_error` 含详情。
-- `sent_bytes < raw_bytes`：未发完，按已发部分对账。
+- 完整性以 `reason` 为准：`raw_bytes` 是原文件总字节数，`sent_bytes` 是实际写入串口的字节数；base64 下后者包含编码与换行，不能通过两者大小关系判断是否发完。
 - 中途写失败/文件读取失败：返回错误，错误信息含已发送字节/片数。
-- 发送期间 `uart_available` 可查 `send` 进度（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`）；`uart_configure` / `uart_close` 在发送期间排队。
+- 发送期间 `uart_available` 可并发查询 `send` 进度（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`），`uart_clear` 也可并发执行，普通 I/O/配置/期待工具会排队；`uart_send_cancel` 可请求取消，目标端口的 `uart_close` 会主动取消并等待发送退出（最长 30 秒），然后关闭端口。
 
 ## 4. 对端准备、EOF 与实测注意事项（真实 Linux 板经验）
 

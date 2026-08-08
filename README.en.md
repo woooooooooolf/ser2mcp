@@ -44,9 +44,9 @@ flowchart LR
 ## Features
 
 - **14 MCP tools**: list ports, open, runtime re-configuration, write, read, write+read, expect output, send-on-match, status, clear buffer, close, file send (estimate / send / cancel)
-- **Streaming file send**: `uart_send_file` sends a local file to the serial port in rate-limited chunks in one call (raw `text` / `base64` with automatic line wrapping), replacing per-chunk `uart_write` calls by the model; with `uart_send_estimate` for time estimation and three-level abort via `uart_send_cancel` / `uart_close` / client cancel notification; progress is queryable while sending
+- **Streaming file send**: `uart_send_file` sends a local file to the serial port in rate-limited chunks in one call (raw `text` / continuous cross-chunk `base64` with automatic line wrapping and padding only at EOF), replacing per-chunk `uart_write` calls by the model; with `uart_send_estimate` for time estimation and three-level abort via `uart_send_cancel` / `uart_close` / client cancel notification; progress is queryable while sending
 - **Full serial parameter control**: baudrate / data bits (5-8) / parity (none/even/odd) / stop bits (1,2) / flow control (none/software/hardware) / read timeout — all settable via `uart_open` / `uart_configure`
-- **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms`, reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
+- **Configurable internal parameters**: ring buffer size `buffer_size` (default 1 MiB, max 16 MiB), idle detection `idle_ms`, per-call fetch cap `max_bytes`, total timeout `timeout_ms` (default 5000ms, max 5 minutes), reader timeout `read_timeout_ms` (default 500ms; safety cap only, does not affect latency)
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
 - **Continuous ingress buffering**: the event-driven reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
 - **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text; `read_mode="text-escaped"` keeps text primary and escapes non-text bytes as `\xNN` (no fallback for terminal/log scenarios)
@@ -148,17 +148,19 @@ Environment variables (optional):
 | `uart_configure` | Re-configure a running port (`port` required; only updates passed fields) |
 | `uart_write` | Send data, return immediately (`port` required; no reply waiting) |
 | `uart_read` | Pull buffered ingress data (`port` required) |
-| `uart_exchange` | Send + read in one step (`port` required; short commands, idle-based completion) |
+| `uart_exchange` | Send + read in one I/O critical section (`port` required; no other tool can interleave; short commands, idle-based completion) |
 | `uart_expect` | Wait for a matching output: block until a specified pattern appears on the port or until timeout (`port`, `pattern` required; optional `data` for one-step "send + wait") |
 | `uart_expect_send` | Send on match: wait for a pattern, then send `reply` in the same critical section (`port`, `pattern`, `reply` required) |
 | `uart_available` | Status snapshot: config, buffered bytes, total overflow, reader-thread errors, file-send progress (`port` required) |
 | `uart_clear` | Clear unread buffered data (`port` required) |
-| `uart_close` | Close the port and release the handle (`port` required; an in-flight file send is interrupted) |
+| `uart_close` | Close the port and release the handle (`port` required; cancels and waits for a file send on the target port, with a 30-second safeguard) |
 | `uart_send_estimate` | Estimate file-send bytes and duration (`path` required; no port needed, `baudrate` defaults to 115200) |
 | `uart_send_file` | Streaming file send: send a local file to the port in rate-limited chunks, one call (`port`, `path` required) |
 | `uart_send_cancel` | Abort an in-flight `uart_send_file` (`port` required; no-op when idle) |
 
 > **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
+
+> **Concurrency & resource limits**: ordinary I/O, configuration, expect, and close calls are serialized by one global I/O lock, so they queue during a file send. `uart_available` / `uart_clear` remain concurrent, `uart_send_cancel` requests cancellation, and `uart_close` actively cancels a send on its target port before waiting for it to exit. Serial baudrate range: 50–4000000. Other limits: `buffer_size` 16 MiB, `chunk_size` 1 MiB, read/exchange/expect `timeout_ms` 300000ms, encoded expect pattern 64 KiB, and `gap_ms` 60000ms.
 
 ### Usage Guide (for AI Agents)
 
@@ -212,7 +214,7 @@ uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → estima
 uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → peer starts receiving
 uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → send in one call
 uart_write {port: "COM3", data: "04"}                                  → send \x04 to end the peer's cat (EOF)
-uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → reconcile
+uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}  → reconcile encoded bytes with sent_bytes and decoded hash with the source file
 ```
 
 ## Loopback Self-Test (Real Hardware, TX-RX Jumpered)

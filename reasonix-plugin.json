@@ -2,7 +2,7 @@
   "apiVersion": "reasonix.io/plugin/v1",
   "name": "ser2mcp",
   "version": "0.8.1",
-  "description": "UART 串口 MCP 服务器：把本地串口设备封装成标准 MCP 工具，让 AI 直接读写串口（枚举/打开/读写/重配置/状态/清缓冲/关闭/文件流式发送，hex/text/text-escaped 多模式，后台读线程 + 环形缓冲不丢数据；插件自带 AI 使用 SKILL）",
+  "description": "UART 串口 MCP 服务器：把本地串口设备封装成标准 MCP 工具，让 AI 直接读写串口（枚举/打开/读写/重配置/状态/清缓冲/关闭/文件流式发送，hex/text/text-escaped 多模式，后台读线程 + 有界环形缓冲，溢出可检测；插件自带 AI 使用 SKILL）",
   "homepage": "https://github.com/woooooooooolf/ser2mcp",
   "repository": "https://github.com/woooooooooolf/ser2mcp",
   "contributes": {

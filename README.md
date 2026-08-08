@@ -44,9 +44,9 @@ flowchart LR
 ## 特性
 
 - **14 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、等待匹配输出、匹配后立即发送、状态、清缓冲、关闭、文件发送（估算/发送/取消）
-- **文件流式发送**：`uart_send_file` 一次调用把本地文件分片限速发送到串口（text 原样 / base64 自动换行），替代模型逐块调 `uart_write`；配套 `uart_send_estimate` 耗时估算与 `uart_send_cancel` / `uart_close` / 客户端取消通知三级中止，发送中可查进度
+- **文件流式发送**：`uart_send_file` 一次调用把本地文件分片限速发送到串口（text 原样 / base64 跨分片连续编码、自动换行，padding 仅在文件末尾），替代模型逐块调 `uart_write`；配套 `uart_send_estimate` 耗时估算与 `uart_send_cancel` / `uart_close` / 客户端取消通知三级中止，发送中可查进度
 - **完整串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
-- **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
+- **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB，上限 16 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`（默认 5000ms，上限 5 分钟）、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
 - **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
 - **上行数据持续缓冲**：事件驱动/非阻塞读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本；`read_mode="text-escaped"` 文本为主、非文本字节 `\xNN` 转义（终端/日志场景不降级）
@@ -148,17 +148,19 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | `uart_configure` | 运行时重配置（`port` 必填，仅更新传入项） |
 | `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
 | `uart_read` | 拉取上行缓冲（`port` 必填） |
-| `uart_exchange` | 发送 + 读取一步完成（`port` 必填；短命令，idle 收尾） |
+| `uart_exchange` | 发送 + 读取在同一 I/O 临界区一步完成（`port` 必填；不会被其它工具插入；短命令、idle 收尾） |
 | `uart_expect` | 等待匹配输出：阻塞直到串口输出中出现指定 pattern 或超时（`port`、`pattern` 必填；可选 `data` 实现"发送+等待"） |
 | `uart_expect_send` | 匹配后立即发送：等待 pattern 出现后在同一临界区内发送 reply（`port`、`pattern`、`reply` 必填） |
 | `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误、文件发送进度（`port` 必填） |
 | `uart_clear` | 清空未读缓冲（`port` 必填） |
-| `uart_close` | 关闭串口并释放句柄（`port` 必填；进行中的文件发送会被中断） |
+| `uart_close` | 关闭串口并释放句柄（`port` 必填；目标端口正在发送文件时先取消并等待退出，30 秒兜底） |
 | `uart_send_estimate` | 估算文件发送字节数与耗时（`path` 必填；无需打开串口，`baudrate` 默认 115200） |
 | `uart_send_file` | 文件流式发送：分片限速发送本地文件到串口，一次调用（`port`、`path` 必填） |
 | `uart_send_cancel` | 中止进行中的文件发送（`port` 必填；无传输时为 no-op） |
 
 > **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
+
+> **并发与资源边界**：普通 I/O、配置、期待与关闭调用通过全局 I/O 锁串行化；文件发送期间这些调用会排队。`uart_available` / `uart_clear` 可并发执行，`uart_send_cancel` 可请求取消；目标端口的 `uart_close` 会主动取消发送并等待退出。串口波特率范围 50–4000000；`buffer_size` 上限 16 MiB，`chunk_size` 上限 1 MiB，read/exchange/expect 的 `timeout_ms` 上限 300000ms，expect pattern 编码后上限 64 KiB，`gap_ms` 上限 60000ms。
 
 ### 使用说明（AI Agent 阅读）
 
@@ -212,7 +214,7 @@ uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → 先估
 uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → 对端开始接收
 uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → 一次发送
 uart_write {port: "COM3", data: "04"}                                  → 补 \x04 结束对端 cat（EOF）
-uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; md5sum /tmp/f.b64", mode: "text", newline: "lf"}  → 对账
+uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}  → 编码字节数与 sent_bytes 对账；解码后哈希与原文件对账
 ```
 
 ## 回环自测（真实硬件，TX-RX 短接）

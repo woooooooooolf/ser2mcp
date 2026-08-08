@@ -1,5 +1,6 @@
 //! 串口管理器：打开/配置/事件驱动读线程/写/读取/期待匹配/文件发送（uart_send_file 系列）。
-//! 支持同时打开多个串口，以端口名为句柄；工具调用全局串行化（AI 回合制调用天然串行）。
+//! 支持同时打开多个串口，以端口名为句柄；普通 I/O、配置、期待与关闭调用通过
+//! 全局 `io_lock` 串行化，状态查询、清缓冲与发送取消不持有该锁。
 //!
 //! 架构：
 //! ```text
@@ -8,7 +9,8 @@
 //! ```
 //! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
-//! - 写/配置/期待/文件发送经 `io_lock` 串行化；read/available/clear 不持有锁，直接操作缓冲；
+//! - 写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；available/clear/cancel
+//!   不持有该锁，可在文件发送期间查询、清缓冲或请求取消；
 //! - 文件发送每片检查点检测：取消标志（uart_send_cancel / uart_close）、客户端取消令牌、
 //!   端口是否仍打开、读线程致命错误（设备物理断开等，返回 reason="device_error"）。
 
@@ -47,12 +49,12 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 pub const MAX_READ_TIMEOUT_MS: u64 = 300_000;
 /// `uart_expect` / `uart_expect_send` 的 `timeout_ms` 上限（毫秒，5 分钟）。
 ///
-/// expect 持有 `io_lock` 直到超时返回，期间其它工具调用全部排队；
+/// expect 持有 `io_lock` 直到超时返回，期间其它需要该锁的工具调用排队；
 /// 上限防止 LLM 传入任意大值导致工具面长时间不可用。
 pub const MAX_EXPECT_TIMEOUT_MS: u64 = 300_000;
 /// `uart_send_file` 的 `gap_ms` 上限（毫秒，1 分钟）。
 ///
-/// 发送期间持有 `io_lock`，过大的片间间隔会让其它工具调用长时间排队；
+/// 发送期间持有 `io_lock`，过大的片间间隔会让其它需要该锁的工具调用长时间排队；
 /// 上限防止 LLM 传入任意大值导致工具面不可用。
 pub const MAX_SEND_GAP_MS: u64 = 60_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -243,7 +245,8 @@ pub struct AvailableInfo {
 pub struct SendProgress {
     /// 是否正在发送文件。
     pub active: bool,
-    /// 最近一次发送的结束原因：completed / cancelled / error；无发送记录时为 `None`。
+    /// 最近一次发送的结束原因：completed / cancelled / device_error / error；
+    /// 无发送记录时为 `None`。
     pub last_reason: Option<String>,
     /// 已写入串口的字节数（base64 模式含换行）。
     pub sent_bytes: u64,
@@ -370,7 +373,7 @@ struct ActivePort {
 #[derive(Default)]
 pub struct SerialManager {
     ports: Mutex<HashMap<String, ActivePort>>,
-    /// 串行化 write/read/configure 工具调用。
+    /// 串行化普通 I/O、配置、期待、文件发送与关闭调用。
     io_lock: tokio::sync::Mutex<()>,
 }
 
@@ -587,7 +590,8 @@ impl SerialManager {
     }
 
     /// 流式发送文件内容（分片 + 可选片间间隔），全程持有 `io_lock`，期间其它
-    /// 写/配置/期待工具调用排队；`uart_available` 不受影响，可随时查询进度。
+    /// 普通 I/O/配置/期待工具调用排队；`uart_available` / `uart_clear` 不受影响，
+    /// `uart_send_cancel` 与目标端口的 `uart_close` 可请求取消。
     ///
     /// `chunks` 为已编码（base64 含换行）的待发送分片迭代器；`total_bytes` 为
     /// 原始文件字节数。每个检查点（每片写入前）检测取消标志（`uart_send_cancel`

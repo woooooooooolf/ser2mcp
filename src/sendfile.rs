@@ -59,7 +59,7 @@ pub struct Estimate {
     pub baudrate: u32,
     /// 预计写入串口的字节数（base64 模式含换行）。
     pub est_sent_bytes: u64,
-    /// 预计发送片数。
+    /// 预计实际写入串口的分片数；base64 模式包含文件末尾的编码收尾/换行片。
     pub est_chunks: u64,
     /// 预计耗时（毫秒）。
     pub est_time_ms: u64,
@@ -77,18 +77,20 @@ pub fn estimate(
     baudrate: u32,
 ) -> Estimate {
     let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
-    let chunks = file_size.div_ceil(chunk_size.max(1) as u64);
-    let (sent_bytes, formula) = match mode {
+    let raw_chunks = file_size.div_ceil(chunk_size as u64);
+    let (sent_bytes, chunks, formula) = match mode {
         SendMode::Text => (
             file_size,
-            "text: sent = file_size; time = sent × 10 / baudrate + chunks × gap_ms",
+            raw_chunks,
+            "text: sent = file_size; chunks = ceil(file_size/chunk_size); time = sent × 10 / baudrate + chunks × gap_ms",
         ),
         SendMode::Base64 => {
             let enc = file_size.div_ceil(3) * 4;
             let newlines = enc.div_ceil(BASE64_LINE_WIDTH as u64);
             (
                 enc + newlines,
-                "base64: sent = ceil(file_size/3)×4 + 换行数; time = sent × 10 / baudrate + chunks × gap_ms",
+                estimate_base64_chunks(file_size, chunk_size as u64),
+                "base64: sent = ceil(file_size/3)×4 + 换行数; chunks = 实际编码写入片数（含末尾收尾/换行片）; time = sent × 10 / baudrate + chunks × gap_ms",
             )
         }
     };
@@ -104,6 +106,24 @@ pub fn estimate(
         est_time_ms: time_ms,
         formula: formula.into(),
     }
+}
+
+/// 根据文件大小和原始分片大小，计算 [`ChunkIter`] 在 base64 模式下实际产出的
+/// 非空写入片数。编码会跨原始分片保留 1–2 个尾字节，并为任何非空文件额外产出
+/// 一个末尾收尾/换行片，因此不能直接使用原始分片数。
+fn estimate_base64_chunks(file_size: u64, chunk_size: u64) -> u64 {
+    if file_size == 0 {
+        return 0;
+    }
+    if chunk_size < 3 {
+        // 每次最多新增一个完整的 3 字节编码组；其余字节及末尾换行在收尾片输出。
+        return file_size / 3 + 1;
+    }
+
+    let full_chunks = file_size / chunk_size;
+    let remainder = file_size % chunk_size;
+    let final_raw_chunk_emits = remainder > 0 && (full_chunks * chunk_size) % 3 + remainder >= 3;
+    full_chunks + u64::from(final_raw_chunk_emits) + 1
 }
 
 /// 分片迭代器：从文件流式读取并编码。
@@ -367,6 +387,20 @@ mod tests {
         let e = estimate(SendMode::Base64, 3, 256, 0, 115200);
         // 3 字节 → 4 字符 base64，1 行换行
         assert_eq!(e.est_sent_bytes, 5);
+        assert_eq!(e.est_chunks, 2); // 编码片 + 末尾换行片
         assert_eq!(e.est_time_ms, 0); // 5*10/115200*1000 = 0.43 → 0
+    }
+
+    #[test]
+    fn base64_estimated_chunks_match_iterator() {
+        for size in 0..=300usize {
+            let data = vec![0x41; size];
+            for chunk_size in [1usize, 2, 3, 4, 5, 7, 57, 76, 256] {
+                let actual = chunks_of(&data, SendMode::Base64, chunk_size).len() as u64;
+                let estimated =
+                    estimate(SendMode::Base64, size as u64, chunk_size, 0, 115200).est_chunks;
+                assert_eq!(estimated, actual, "size={size}, chunk_size={chunk_size}");
+            }
+        }
     }
 }

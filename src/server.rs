@@ -6,7 +6,7 @@
 //! - `uart_configure`    运行时重配置（仅更新传入项）
 //! - `uart_write`        只发不等
 //! - `uart_read`         拉取缓冲（空闲判定/上限/超时三种返回条件）
-//! - `uart_exchange`     写 + 读（对 LLM 最常用的一步操作）
+//! - `uart_exchange`     写 + 读（同一 I/O 临界区；短命令、idle 收尾）
 //! - `uart_expect`       等待匹配输出（可选"发送+等待"；内容匹配语义）
 //! - `uart_expect_send`  匹配后立即发送（等待→命中→发送一步原子完成）
 //! - `uart_available`    状态快照（含缓冲统计、读线程错误与发送进度）
@@ -121,11 +121,13 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   返回 raw_bytes/sent_bytes/chunks/elapsed_ms/overflow 统计，可与对端 wc -c 对账。
 - chunk_size 是模型的责任：先查对端 tty 缓冲限制（如板端 stty -a 看 icanon/行缓冲）与波特率，
   选 chunk_size ≤ 缓冲上限，宁小勿大——无流控下超限即丢字节且不可恢复；默认 256 字节。
-- mode="text"（默认）原样按字节发；mode="base64" 服务器编码后发（每 76 字符自动换行、
-  末尾补换行），适合 icanon 行缓冲对端 cat > file；base64 实际发送 ≈ 1.34 倍 + 换行。
+- mode="text"（默认）原样按字节发；mode="base64" 服务器跨原始分片连续编码（padding 仅在文件末尾），
+  每 76 字符自动换行、末尾补换行，适合 icanon 行缓冲对端 cat > file；base64 实际发送 ≈ 1.34 倍 + 换行。
 - 只承诺"把文件字节发出去"：不解析数据格式、不主动发 EOF（对端需要 EOF 时另用 uart_write 补 \x04）。
-- 发送期间 io_lock 独占：uart_configure/uart_close 会排队等待；uart_available 可随时查进度；
-  uart_send_cancel 或 uart_close 可中止（close 会中断并关闭传输）。
+- 发送期间 io_lock 独占：普通 I/O/配置/期待工具会排队；uart_available/uart_clear 可并发，
+  uart_send_cancel 可请求取消；目标端口的 uart_close 会先请求取消并等待发送退出（最长 30 秒），再关闭端口。
+- 资源上限：buffer_size ≤ 16 MiB；chunk_size ≤ 1 MiB；read/exchange/expect 的 timeout_ms ≤ 300000；
+  expect pattern ≤ 64 KiB；gap_ms ≤ 60000。
 - 设备异常感知：若读线程检测到致命错误（串口被物理断开等），发送在下一个检查点中止并返回
   reason="device_error" + device_error 详情（写侧可能仍"假成功"，须以此为准并做对端对账）。
 - 大文件耗时可能很长（1 MiB @115200 ≈ 87 秒），务必先估算再发，并提示用户预期等待时间。
@@ -136,7 +138,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   uart_write {port, data: "04"}                                                            // 补 \x04 结束对端 cat（EOF）
   uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
   // 对账：wc -c 应与返回的 sent_bytes 一致，md5sum 应与本地文件一致；
-  // reason=cancelled/device_error 或 sent_bytes < raw_bytes 时说明未发完，按已发部分对账后重发。
+  // reason=cancelled/device_error 时说明未发完；base64 下 sent_bytes 是编码后字节数，不能与 raw_bytes 比大小判断完整性。
   // 注：对端为 Linux shell 时命令可用 newline="lf"（避免 \r 残留）；uboot 等只认 \r 的设备用 crlf。
 
 回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
@@ -146,7 +148,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
 pub struct OpenArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 波特率，默认 115200。
+    /// 波特率，默认 115200，范围 50..=4000000。
     pub baudrate: Option<u32>,
     /// 数据位（5-8），默认 8。
     pub data_bits: Option<u8>,
@@ -160,7 +162,8 @@ pub struct OpenArgs {
     /// 在事件驱动/非阻塞读线程下仅作为 `read()` 的安全上限（检测异常超时），
     /// 不再影响读写延迟；板端命令执行时间较长时可适当调大。
     pub read_timeout_ms: Option<u64>,
-    /// 上行环形缓冲大小（字节），默认 1048576（1 MiB）；写满覆盖最旧数据并计数溢出。
+    /// 上行环形缓冲大小（字节），默认 1048576（1 MiB），范围 1..=16777216（16 MiB）；
+    /// 写满覆盖最旧数据并计数溢出。
     pub buffer_size: Option<usize>,
     /// 打开时是否清空串口驱动输入缓冲中残留的旧数据，默认 true。
     pub discard_on_open: Option<bool>,
@@ -171,7 +174,7 @@ pub struct OpenArgs {
 pub struct ConfigureArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 波特率。
+    /// 波特率，范围 50..=4000000。
     pub baudrate: Option<u32>,
     /// 数据位（5-8）。
     pub data_bits: Option<u8>,
@@ -209,7 +212,7 @@ pub struct ReadArgs {
     pub idle_ms: Option<u64>,
     /// 未读字节数达到该值立即返回（防堆积），默认 65536。
     pub max_bytes: Option<usize>,
-    /// 总等待超时（毫秒），默认 5000。
+    /// 总等待超时（毫秒），默认 5000，上限 300000（5 分钟）。
     pub timeout_ms: Option<u64>,
     /// 返回编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped
     /// （文本为主，控制字节/非法 UTF-8 以 \xNN 转义，恒可读不降级）。
@@ -232,7 +235,7 @@ pub struct ExchangeArgs {
     pub idle_ms: Option<u64>,
     /// 未读字节数达到该值立即返回，默认 65536。
     pub max_bytes: Option<usize>,
-    /// 总等待超时（毫秒），默认 5000。
+    /// 总等待超时（毫秒），默认 5000，上限 300000（5 分钟）。
     pub timeout_ms: Option<u64>,
     /// 返回编码：hex（默认）、text 或 text-escaped。
     pub read_mode: Option<String>,
@@ -264,11 +267,11 @@ pub struct CloseArgs {
 pub struct ExpectArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 要等待出现的字符串（hex 或 text，取决于 pattern_mode）。
+    /// 要等待出现的非空字符串（hex 或 text，取决于 pattern_mode），编码后上限 65536 字节。
     pub pattern: String,
     /// pattern 编码：hex（默认）或 text。
     pub pattern_mode: Option<String>,
-    /// 总等待超时（毫秒），默认 5000。
+    /// 总等待超时（毫秒），默认 5000，上限 300000（5 分钟）。
     pub timeout_ms: Option<u64>,
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true；
     /// false 时纯等待（数据留在缓冲，后续可用 uart_read 取走）。
@@ -288,7 +291,7 @@ pub struct ExpectArgs {
 pub struct ExpectSendArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 要等待出现的字符串（hex 或 text，取决于 pattern_mode）。
+    /// 要等待出现的非空字符串（hex 或 text，取决于 pattern_mode），编码后上限 65536 字节。
     pub pattern: String,
     /// 命中后立即发送的内容（hex 或 text，取决于 reply_mode）；超时未命中时不发送。
     pub reply: String,
@@ -296,7 +299,7 @@ pub struct ExpectSendArgs {
     pub pattern_mode: Option<String>,
     /// reply 编码：hex（默认）或 text。
     pub reply_mode: Option<String>,
-    /// 总等待超时（毫秒），默认 5000。
+    /// 总等待超时（毫秒），默认 5000，上限 300000（5 分钟）。
     pub timeout_ms: Option<u64>,
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true。
     pub consume: Option<bool>,
@@ -311,11 +314,13 @@ pub struct SendFileArgs {
     pub port: String,
     /// 本地文件路径（服务器读取；须存在、是普通文件、可读）。
     pub path: String,
-    /// 编码：text（默认，原样按字节发）/ base64（服务器编码后发，每 76 字符自动换行）。
+    /// 编码：text（默认，原样按字节发）/ base64（服务器跨分片连续编码，padding 仅在文件末尾，
+    /// 每 76 字符自动换行并在文件末尾补换行）。
     pub mode: Option<String>,
-    /// 分片大小（原始字节），默认 256。模型须依据对端 tty 缓冲限制与波特率选择，宁小勿大。
+    /// 分片大小（原始字节），默认 256，范围 1..=1048576（1 MiB）。
+    /// 模型须依据对端 tty 缓冲限制与波特率选择，宁小勿大。
     pub chunk_size: Option<usize>,
-    /// 片间间隔（毫秒），默认 0（每片写完 flush 已天然限速到波特率上限）。
+    /// 片间间隔（毫秒），默认 0，上限 60000（每片写完 flush 已天然限速到波特率上限）。
     pub gap_ms: Option<u64>,
 }
 
@@ -326,9 +331,9 @@ pub struct SendEstimateArgs {
     pub path: String,
     /// 编码：text（默认）/ base64。
     pub mode: Option<String>,
-    /// 分片大小（原始字节），默认 256。
+    /// 分片大小（原始字节），默认 256，范围 1..=1048576（1 MiB）。
     pub chunk_size: Option<usize>,
-    /// 片间间隔（毫秒），默认 0。
+    /// 片间间隔（毫秒），默认 0，上限 60000。
     pub gap_ms: Option<u64>,
     /// 波特率，默认 115200。
     pub baudrate: Option<u32>,
@@ -401,8 +406,8 @@ fn send_file_meta(path: &str) -> Result<u64, String> {
         return Err("path 不能为空".into());
     }
     let meta = std::fs::metadata(path).map_err(|e| format!("无法访问文件 {path}: {e}"))?;
-    if meta.is_dir() {
-        return Err(format!("{path} 是目录，不是普通文件"));
+    if !meta.is_file() {
+        return Err(format!("{path} 不是普通文件"));
     }
     // 打开验证可读（权限问题在这里暴露）。
     std::fs::File::open(path).map_err(|e| format!("打开文件 {path} 失败: {e}"))?;
@@ -721,7 +726,7 @@ impl Ser2Mcp {
         if gap_ms > manager::MAX_SEND_GAP_MS {
             return Err(McpError::invalid_params(
                 format!(
-                    "gap_ms 超出上限 {}ms（发送期间其它工具调用会排队）",
+                    "gap_ms 超出上限 {}ms（发送期间其它需要 I/O 锁的工具调用会排队）",
                     manager::MAX_SEND_GAP_MS
                 ),
                 None,
@@ -746,7 +751,7 @@ impl Ser2Mcp {
     /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
     /// / 客户端取消通知（notifications/cancelled）均可中止。
     #[tool(
-        description = "文件流式发送（port、path 必填）：分片限速发送本地文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（编码后发，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256（模型须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计，可与对端 wc -c 对账；reason=device_error（设备断开等读线程致命错误）或 cancelled 时按 sent_bytes 对账后重发。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+        description = "文件流式发送（port、path 必填）：分片限速发送本地普通文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB（须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计，可与对端 wc -c 对账；reason=device_error（设备断开等读线程致命错误）或 cancelled 时按 sent_bytes 对账后重发。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
     )]
     async fn uart_send_file(
         &self,
@@ -770,7 +775,7 @@ impl Ser2Mcp {
         if gap_ms > manager::MAX_SEND_GAP_MS {
             return Err(McpError::invalid_params(
                 format!(
-                    "gap_ms 超出上限 {}ms（发送期间其它工具调用会排队）",
+                    "gap_ms 超出上限 {}ms（发送期间其它需要 I/O 锁的工具调用会排队）",
                     manager::MAX_SEND_GAP_MS
                 ),
                 None,
@@ -867,10 +872,11 @@ impl Ser2Mcp {
         }
     }
 
-    /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复。
+    /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复；写入与读取
+    /// 持有同一全局 I/O 临界区，不会被其它工具调用插入。
     /// 适合短命令/无锚点场景（如 AT 查询）；长命令（存在中间静默期）改用 uart_expect。
     #[tool(
-        description = "发送数据并等待回复（port 必填；uart_write + uart_read 的组合，一步完成）。返回 written、data、reason 及溢出统计。"
+        description = "发送数据并等待回复（port 必填；写入与读取在同一 I/O 临界区完成，不会被其它工具调用插入）。适合短命令、idle 收尾；返回 written、data、reason 及溢出统计。"
     )]
     async fn uart_exchange(
         &self,
@@ -951,7 +957,7 @@ impl Ser2Mcp {
         if timeout_ms > manager::MAX_EXPECT_TIMEOUT_MS {
             return Err(McpError::invalid_params(
                 format!(
-                    "timeout_ms 超出上限 {}ms（expect 期间其它工具调用会排队）",
+                    "timeout_ms 超出上限 {}ms（expect 期间其它需要 I/O 锁的工具调用会排队）",
                     manager::MAX_EXPECT_TIMEOUT_MS
                 ),
                 None,
@@ -1030,7 +1036,7 @@ impl Ser2Mcp {
         if timeout_ms > manager::MAX_EXPECT_TIMEOUT_MS {
             return Err(McpError::invalid_params(
                 format!(
-                    "timeout_ms 超出上限 {}ms（expect 期间其它工具调用会排队）",
+                    "timeout_ms 超出上限 {}ms（expect 期间其它需要 I/O 锁的工具调用会排队）",
                     manager::MAX_EXPECT_TIMEOUT_MS
                 ),
                 None,
@@ -1079,8 +1085,11 @@ impl Ser2Mcp {
         }
     }
 
-    /// 关闭串口：停止并回收读线程，释放端口句柄。
-    #[tool(description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。")]
+    /// 关闭串口：若目标端口正在发送文件，先请求取消并等待发送退出（最长 30 秒），
+    /// 再停止并回收读线程、释放端口句柄。
+    #[tool(
+        description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。目标端口正在 uart_send_file 时会先请求取消并等待其退出（最长 30 秒），再关闭端口。"
+    )]
     async fn uart_close(
         &self,
         Parameters(args): Parameters<CloseArgs>,

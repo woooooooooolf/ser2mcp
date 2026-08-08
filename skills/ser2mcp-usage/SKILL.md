@@ -16,7 +16,7 @@ ser2mcp 是 MCP 串口服务器：把本地串口暴露为 MCP 工具，字节�
 | `uart_configure` | 运行时重配置（仅更新传入项） |
 | `uart_write` | 只发不等回复 |
 | `uart_read` | 拉取上行缓冲（idle / 上限 / 超时三条件返回） |
-| `uart_exchange` | 写 + 读一步完成（**短命令**，idle 收尾） |
+| `uart_exchange` | 写 + 读在同一 I/O 临界区完成（无其它工具插入；**短命令**，idle 收尾） |
 | `uart_expect` | 等待输出中出现 pattern 或超时（时序编排核心；可选 data 一步"发送+等待"） |
 | `uart_expect_send` | pattern 命中后立即发送 reply（抢时序窗口） |
 | `uart_available` | 状态快照：配置、缓冲、溢出、读线程错误、发送进度 |
@@ -58,9 +58,11 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 
 1. **空闲判定**：以收到最后一个字节为起点，持续 `idle_ms`（默认 300ms）无新数据且驱动无残留 → 响应结束（`reason: "idle"`）。`idle_ms` 应大于设备响应间隙（否则响应被截断），调小则降低延迟。**它度量的是字节流里的静默，不是命令执行时间**——慢操作（需数秒）不要靠加大 `idle_ms` 干等，改用 `uart_expect` 输出锚点。
 2. **达到上限**：未读字节 ≥ `max_bytes`（默认 64 KiB）→ 防堆积。
-3. **总超时**：等待超过 `timeout_ms`（默认 5000ms）。
+3. **总超时**：等待超过 `timeout_ms`（默认 5000ms，上限 300000ms / 5 分钟）。
 
 **诊断**：返回的 `overflow_delta > 0` 表示缓冲溢出有数据被覆盖丢弃——数据有缺口，应调大 `buffer_size` 或减小拉取间隔。
+
+**资源边界**：串口波特率范围 50..=4000000；`buffer_size` 范围 1..=16 MiB；expect pattern 编码后上限 64 KiB。文件发送的 `chunk_size` / `gap_ms` 边界见 `ser2mcp-file-transfer`。
 
 **语义边界**：`reason: "idle"` 只表示字节流出现静默，**不等于命令执行完成**——慢命令输出中途的静默间隙、或命令失败无输出时，idle 同样会返回。命令是否完成用 §5 的锚点判定，不要用 idle 推断。
 
@@ -100,6 +102,8 @@ uart_list_ports → uart_open {port, baudrate} → 交互 → uart_close {port}
 - 无锚点（如 AT 模块）→ `uart_exchange` 的 idle 判定收尾；
 - 需"完成即触发" → `uart_expect_send`；
 - 大文件 → `uart_send_file`（见 ser2mcp-file-transfer）。
+
+普通 I/O、配置、期待与关闭调用通过全局 I/O 锁串行化；文件发送期间这些调用会排队。`uart_available` / `uart_clear` 可并发执行，`uart_send_cancel` 可请求取消；目标端口的 `uart_close` 会先取消发送并等待退出（最长 30 秒）。
 
 ## 7. 故障排查
 
