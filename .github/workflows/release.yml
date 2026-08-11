@@ -26,7 +26,7 @@ jobs:
             artifact: ser2mcp-macos-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust 工具链
         run: rustup toolchain install stable --profile minimal
@@ -112,7 +112,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 下载产物
         uses: actions/download-artifact@v4
