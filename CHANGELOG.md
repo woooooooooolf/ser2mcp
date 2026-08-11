@@ -2,13 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.8.2] - 2026-08-11
 
 ### Fixed
 
 - 修正 `uart_send_estimate.est_chunks` 在 base64 模式下未计入跨分片编码收尾/末尾换行片的问题，使估算片数与 `uart_send_file.chunks` 一致
 - 同步 MCP schema、INSTRUCTIONS、README 与 SKILL 的资源上限、全局 I/O 临界区、base64 连续编码、发送取消和对账语义，移除会误判完整性或数据不丢失的表述
 - 精简 Release 包内容：平台二进制位于包根目录（与 `skills/` 同级），不再打包 `reasonix-plugin.json` 与 `bin/`
+- 插件 manifest 迁移至 `reasonix.io/plugin/v2`（`mcpServers` 移入 `contributes` 块），满足 Reasonix v1.22+ 对原生插件 manifest 的强制要求，修复 v1 manifest 在更新版本下无法安装/更新的问题
+
+### Changed
+
+- 升级 CI Actions：`actions/checkout` v4→v7、`actions/download-artifact` v4→v8、`actions/upload-artifact` v4→v7，消除 Node.js 20 弃用警告并跟随上游安全修复
+- 升级 Rust 依赖：`windows-sys` 0.52→0.61（统一 Win32_Media API）、`base64` 0.22→0.23（与 rmcp 传递依赖合并为单版本）、`rmcp` 3.1.0→3.1.2
 
 ## [0.8.1] - 2026-08-08
 
@@ -183,4 +189,5 @@
 [0.7.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.7.0
 [0.8.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.0
 [0.8.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.1
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.1...HEAD
+[0.8.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.2
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.2...HEAD
