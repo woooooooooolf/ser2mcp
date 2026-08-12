@@ -236,7 +236,7 @@ examples/
 
 ## Security Notice
 
-ser2mcp gives AI assistants direct read/write access to your serial ports: any authorized MCP client (and the model behind it) can send arbitrary bytes to connected devices. Only connect devices you trust, make sure your MCP client and model are from reliable sources, and do not use this tool with devices that could be damaged by incorrect commands.
+ser2mcp gives AI assistants direct serial I/O and local-file sending capabilities. An authorized MCP client—and the model behind it—can send arbitrary bytes to connected devices. `uart_send_file` can also read any regular file accessible to the ser2mcp process and transmit it over the serial port; the server does not restrict paths to an allowlist. Run ser2mcp with a least-privileged account, connect only trusted devices, and verify that both the file path and destination device are within the user's authorized scope before sending. See [SECURITY.md](SECURITY.md) for details.
 
 ## Troubleshooting
 

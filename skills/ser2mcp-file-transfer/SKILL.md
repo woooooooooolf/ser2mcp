@@ -9,6 +9,8 @@ description: 串口文件流式发送指南：uart_send_estimate/uart_send_file/
 
 ## 1. 完整流程（先估算 → 再发送 → 对账）
 
+先确认用户授权发送该文件到目标设备。`path` 由调用方指定，ser2mcp 可读取其进程权限范围内的任意普通文件，不限制目录；不要发送授权范围外的凭据、密钥或配置文件。
+
 ```
 1. uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}
    → 先估算发送字节数与耗时（无需打开串口；baudrate 默认 115200）

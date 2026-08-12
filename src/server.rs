@@ -116,6 +116,8 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透�
   返回值中的 overflow_delta > 0 可帮助识别该情况。
 
 文件发送（uart_send_estimate → uart_send_file，替代大文件逐块 uart_write，省协议与 token）:
+- path 由调用方指定，ser2mcp 可读取其进程权限范围内的任意普通文件且不限制目录；
+  调用前必须确认文件路径与目标设备都在用户授权范围内。
 - uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}：先估算发送字节数与耗时
   （8N1 公式：耗时 ≈ 发送字节数 × 10 / 波特率 + 片数 × gap_ms），无需打开串口。
 - uart_send_file {port, path, mode?, chunk_size?, gap_ms?}：服务器分片限速发送，一次调用；
@@ -754,7 +756,7 @@ impl Ser2Mcp {
     /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
     /// / 客户端取消通知（notifications/cancelled）均可中止。
     #[tool(
-        description = "文件流式发送（port、path 必填）：分片限速发送本地普通文件到串口，替代模型逐块 uart_write。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB（须依据对端 tty 缓冲与波特率选择，宁小勿大）；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+        description = "文件流式发送（port、path 必填）：读取 ser2mcp 进程有权访问的本地普通文件并分片发送到串口；服务端不限制目录，调用前须确认路径与目标设备均在用户授权范围内。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
     )]
     async fn uart_send_file(
         &self,
