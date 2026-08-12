@@ -43,110 +43,24 @@ use crate::manager::{
 };
 use crate::sendfile;
 
-/// 对 AI 助手的使用指引（随 initialize 返回）。
-const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器（原样透传，不解析、不过滤字节流内容；uart_expect 系列仅在缓冲中做条件查找，不修改数据）。
+/// 对 AI 助手的核心使用约束（随 initialize 返回）；详细流程由插件 SKILL 提供。
+const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透传字节流，不解析设备协议。
 
-典型流程：uart_list_ports → uart_open {port} → uart_exchange {port, data} → uart_close {port}；时序编排用 uart_expect（等待匹配输出）。
+核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
+- 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
+- 二进制使用 mode/read_mode="hex"；终端命令使用 mode="text"、显式 newline，并优先用 read_mode="text-escaped"。
+- 有提示符或结束标记时用 uart_expect；需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。
+- reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
+- 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
+- pattern 是大小写敏感的原始字节子串，不支持正则；历史未读数据会立即参与匹配。
 
-多端口：
-- 支持同时打开多个串口；端口名（如 "COM3" / "/dev/ttyUSB0"）就是句柄，
-  除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要传 port 参数。
-- 重复打开同一端口会报错，请先 uart_close 再打开。
+文件发送：
+- 先确认本地 path 与目标设备均在用户授权范围内；服务端可读取进程有权访问的任意普通文件，不限制目录。
+- 按 uart_send_estimate → 准备对端 → uart_send_file 一次调用 → EOF/按长度结束 → 对端长度和哈希对账执行；不要循环 uart_write。
+- reason 只表示服务器端结束状态；completed 不代表对端完整接收。base64 的 sent_bytes 包含编码和换行，不能与 raw_bytes 直接比较。
+- ser2mcp 不主动发送 EOF。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
 
-数据表示：
-- 二进制一律用 hex 字符串传递（如 "41 54 0D 0A"），每字节两个大写十六进制字符、空格分隔；
-  也接受连续串（"41540D0A"）、逗号/分号/0x 前缀等宽松形式。
-- 文本模式（mode="text"）下直接传 UTF-8 字符串；返回时若数据非合法文本则自动降级为 hex。
-- read_mode="text-escaped"（推荐终端/日志场景）：文本为主，控制字节（如 ANSI 颜色码的 ESC）
-  与非法 UTF-8 字节转义为 \xNN（如 \x1B），\r\n\t 保留，恒可读、不降级；字面反斜杠转义为 \\。
-- 发送终端命令（shell/uboot 等）务必带行尾：传 newline="crlf"（追加 \r\n）或 data 自带 \r\n，
-  否则命令停留在设备行缓冲不执行；且未带行尾的命令会残留缓冲、与下一条命令拼合执行
-  （如 "ls" + "ls /" 会实际执行 "lsls /"），造成命令被篡改，务必避免。
-- 发送编码（mode）仅支持 hex 或 text；text-escaped 仅用于返回编码（read_mode）。
-
-最简示例（按设备类型选择编码）：
-- 交互式终端（Linux Shell / uboot）：命令需行尾触发，输出常含 ANSI 颜色码。
-  uart_exchange {port, data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}
-  newline="crlf" 自动追加 \r\n 使命令执行；text-escaped 使颜色码转义、输出可读；
-  多命令流程用 uart_expect 等提示符锚点（如 pattern: "# "）判断完成，可一步"发送+等待"：
-  uart_expect {port, data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}
-- MCU / AT 指令调试：协议逐字节严格，不自动追加字节。
-  uart_exchange {port, data: "AT\r\n", mode: "text"} 或 uart_exchange {port, data: "AA 55 01 00 0D 0A", mode: "hex"}
-  缺省 newline="none"、mode="hex" 时行为与旧版一致，适配任意协议。
-
-读取语义（重要）：
-- 串口上行数据由事件驱动/非阻塞读线程持续囤积在有界环形缓冲中（写满覆盖最旧并计数溢出），
-  工具按需拉取，而非设备主动推送。
-- uart_read / uart_exchange 在三种条件下返回：① 空闲判定：以收到最后一个字节为起点，
-  持续 idle_ms（默认 300ms）无新数据且驱动侧无残留字节（数据流中不算空闲）；
-  ② 未读字节数达到 max_bytes（默认 64KiB）；③ 总等待超过 timeout_ms（默认 5000ms）。
-- idle_ms 判定的是响应内部的静默间隙：相邻数据块间隔 < idle_ms 合并为一次响应，
-  > idle_ms 截断为两次；应大于设备响应间隙（否则截断），调小则降低延迟。
-- 返回值中的 overflow_delta / overflow_total 表示缓冲溢出被覆盖丢弃的字节数，
-  大于 0 时说明数据有缺口，应调大 buffer_size 或减小拉取间隔。
-
-命令执行完成判定（重要）：
-- 一次只发一个短命令，发送后立即判断执行是否完成，不要用 sleep 盲等；
-- 完成判定优先用输出锚点：uart_expect 等待提示符/关键字（如 shell 的 "# "、"$ "
-  或设备状态字符串），锚点出现即完成，再发下一条；需要"完成即触发"用 uart_expect_send；
-  提示符因设备而异、无通用提示符；提示符不可用（echo 关闭/无提示符设备）时改用命令特有结束标记。
-- 仅当设备没有明确锚点（如 AT 命令）时才用 uart_exchange 的 idle 判定收尾；
-- 长命令（wget/tar 解包等，存在中间静默期）：uart_expect 的语义是"等 pattern 或超时"、与 idle 无关，
-  timeout_ms 只是兜底上限（上限 5 分钟，命中即提前返回、放大无成本）——无中间锚点的长命令
-  将 timeout_ms 放大到覆盖整个命令时长即可，不要用 uart_exchange 的 idle 判定干等。
-- 可选对齐（tty 处于 icanon 时）：可发 \x15（Ctrl+U）清板端行缓冲残留、\x03（Ctrl+C）中断当前命令，
-  作为每条命令前的对齐步骤；uart_clear 只清宿主上行缓冲，覆盖不到板端残留。
-- 设备环境未知时，先确认收尾依据（提示符/结束标记）是否可用再选接口；ser2mcp 仅提供字节透传与
-  等待/读取原语，调试动作由调用方自行判断。
-
-内容匹配语义（uart_expect / uart_expect_send）：
-- uart_expect 等待串口输出中出现指定 pattern（如 "Zynq>"、"Hit any key" 等提示符/关键字，
-  pattern_mode="text"），命中或超时后返回；可选 data 实现"发送+等待"一步完成。
-  consume=true（默认）时返回"截至 pattern 结尾"的内容，pattern 之后的数据留在缓冲；
-  consume=false 时纯等待、数据不消费。调用时缓冲中已有的数据立即参与匹配（可命中历史输出）。
-- uart_expect_send 等待 pattern 出现后在同一临界区内立即发送 reply（如
-  {"pattern": "Hit any key", "reply": "\\n", "reply_mode": "text"} 抢 bootdelay 窗口），超时未命中时不发送。
-- 两者均为精确子串匹配（大小写敏感），不支持正则；命中即返回（毫秒级），时序编排见上文
-  "命令执行完成判定"。
-- pattern 匹配作用于原始字节，与返回编码无关：设备输出带 ANSI 颜色码时，
-  pattern 用纯文本关键字（如 "login:"、"# "）仍可命中，返回用 read_mode="text-escaped" 即可读。
-- consume=true 消费后，pattern 之后的数据留在缓冲，会混入下一次 uart_read / uart_exchange
-  的返回值（属未读数据，正常语义）；需要精确对齐时先 uart_clear 或先 uart_read 消费残留。
-- 注意：若缓冲溢出覆盖了 pattern 且设备不再重发，expect 会一直等到超时；
-  返回值中的 overflow_delta > 0 可帮助识别该情况。
-
-文件发送（uart_send_estimate → uart_send_file，替代大文件逐块 uart_write，省协议与 token）:
-- path 由调用方指定，ser2mcp 可读取其进程权限范围内的任意普通文件且不限制目录；
-  调用前必须确认文件路径与目标设备都在用户授权范围内。
-- uart_send_estimate {path, mode?, chunk_size?, gap_ms?, baudrate?}：先估算发送字节数与耗时
-  （8N1 公式：耗时 ≈ 发送字节数 × 10 / 波特率 + 片数 × gap_ms），无需打开串口。
-- uart_send_file {port, path, mode?, chunk_size?, gap_ms?}：服务器分片限速发送，一次调用；
-  返回 raw_bytes/sent_bytes/chunks/elapsed_ms/overflow 统计，可与对端 wc -c 对账。
-- chunk_size 是模型的责任：先查对端 tty 缓冲限制（如板端 stty -a 看 icanon/行缓冲）与波特率，
-  选 chunk_size ≤ 缓冲上限，宁小勿大——无流控下超限即丢字节且不可恢复；默认 256 字节。
-- mode="text"（默认）原样按字节发；mode="base64" 服务器跨原始分片连续编码（padding 仅在文件末尾），
-  每 76 字符自动换行、末尾补换行，适合 icanon 行缓冲对端 cat > file；base64 实际发送 ≈ 1.34 倍 + 换行。
-- 只承诺"把文件字节发出去"：不解析数据格式、不主动发 EOF（对端需要 EOF 时另用 uart_write 补 \x04）。
-- 发送期间 io_lock 独占：普通 I/O/配置/期待工具会排队；uart_available/uart_clear 可并发，
-  uart_send_cancel 可请求取消；目标端口的 uart_close 会先请求取消并等待发送退出（最长 30 秒），再关闭端口。
-- 资源上限：buffer_size ≤ 16 MiB；chunk_size ≤ 1 MiB；read/exchange/expect 的 timeout_ms ≤ 300000；
-  expect pattern ≤ 64 KiB；gap_ms ≤ 60000。
-- 设备异常感知：若读线程检测到致命错误（串口被物理断开等），发送在下一个检查点中止并返回
-  reason="device_error" + device_error 详情（写侧可能仍"假成功"，须以此为准并做对端对账）。
-- 大文件耗时可能很长（1 MiB @115200：text 理论下限约 91 秒，base64 约 123 秒，均未计额外开销），
-  务必先估算再发，并提示用户预期等待时间。
-
-文件发送完整示例（base64 传文件到 Linux 板，端到端可对账）：
-  uart_exchange {port, data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  // 对端开始接收
-  uart_send_file {port, path: "C:/tmp/fw.bin", mode: "base64", chunk_size: 256}            // 一次调用发完
-  uart_write {port, data: "04"}                                                            // 补 \x04 结束对端 cat（EOF）
-  uart_exchange {port, data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}
-  // 对账：wc -c 应与返回的 sent_bytes 一致，md5sum 应与本地文件一致；
-  // reason 仅表示服务器端结束状态；端到端完整性须用对端字节数与解码后哈希确认。
-  // base64 下 sent_bytes 是编码后字节数，不能与 raw_bytes 比大小判断完整性。
-  // 注：对端为 Linux shell 时命令可用 newline="lf"（避免 \r 残留）；uboot 等只认 \r 的设备用 crlf。
-
-回环自测：TX-RX 短接时 uart_exchange 发送的内容应原样返回。"##;
+详细决策与故障处理见 ser2mcp-usage SKILL；文件/固件传输见 ser2mcp-file-transfer SKILL。"##;
 
 /// 串口工具参数：uart_open。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
