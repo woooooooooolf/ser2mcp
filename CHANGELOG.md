@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-08-12
+
 ### Fixed
 
 - 修正 `uart_send_file` 错用读取消费基线计算上行缓冲溢出，导致传输期间已发生覆盖却返回 `overflow_delta=0` 的问题；返回值现在直接比较环形缓冲的调用前后累计计数
@@ -206,4 +208,5 @@
 [0.8.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.1
 [0.8.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.2
 [0.8.3]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.3
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.3...HEAD
+[0.8.4]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.4
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.4...HEAD
