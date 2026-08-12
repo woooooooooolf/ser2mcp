@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-12
+
 ### Docs
 
 - 精简中英文 README，聚焦安装、接入、工具能力、AI 使用入口、安全边界与验证流程
@@ -198,4 +200,5 @@
 [0.8.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.0
 [0.8.1]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.1
 [0.8.2]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.2
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.2...HEAD
+[0.8.3]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.3
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.3...HEAD
