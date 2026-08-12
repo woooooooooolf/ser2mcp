@@ -12,6 +12,7 @@ description: 使用 ser2mcp 经 UART/COM 串口发送本地文件或固件。用
 - 根据对端缓冲能力选择 `chunk_size`，不确定时从默认值 256 开始；无流控时宁小勿大。
 - 把 `reason` 解释为服务器端结束状态，不解释为对端完整接收。
 - 传输完成后在对端核对字节数和解码后哈希；只有对账一致才能确认端到端完整性。
+- `uart_send_file` 返回后立即调用 `uart_available` 或 `uart_read`，以最新 `overflow_total` 确认上行缓冲是否覆盖；发送返回中的 0 不是最终无溢出证明。
 - ser2mcp 不主动发送 EOF。开始发送前先确定对端按长度结束，还是需要调用方另发 EOF。
 
 ## 执行流程
@@ -57,7 +58,7 @@ description: 使用 ser2mcp 经 UART/COM 串口发送本地文件或固件。用
 - `raw_bytes`：原文件总字节数。
 - `sent_bytes`：实际写入串口的输出字节数；base64 下包含编码和换行，不能与 `raw_bytes` 直接比较来判断完成。
 - `chunks`：已完成写入的输出分片数。
-- `overflow_delta` / `overflow_total`：传输期间上行环形缓冲的丢失计数，不是下行传输完整性证明。
+- `overflow_delta` / `overflow_total`：从发送开始到生成返回时，读线程已观察到的上行环形缓冲覆盖快照。串口驱动或线路中的尾部字节可能在返回后继续推高计数；即使返回 0，也要用随后的 `uart_available` / `uart_read` 获取最新 `overflow_total`。这些字段不是下行传输完整性证明。
 
 发送期间可调用 `uart_available` 查看 `send.active`、`sent_bytes`、`total_bytes`、`chunks` 和 `last_reason`。普通 I/O、配置和 expect 调用会等待全局 I/O 锁；`uart_available` / `uart_clear` 可并发，`uart_send_cancel` 可请求取消。
 

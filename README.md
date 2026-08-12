@@ -83,7 +83,9 @@ Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等
 最重要的语义边界：
 
 - `reason="idle"` 只表示字节流静默，不表示命令已完成；有提示符或结束标记时使用 `uart_expect`
+- 终端开启输入回显时，命令中包含的 pattern 会让 `uart_expect` 提前命中；关闭回显，或使用完整 pattern 不连续出现在命令文本中的输出锚点
 - `overflow_delta > 0` 表示环形缓冲已有数据被覆盖，当前读取结果存在缺口
+- `uart_send_file` 的 overflow 是返回时快照；返回后用 `uart_available` / `uart_read` 再确认最新 `overflow_total`，0 不代表最终无溢出
 - `uart_send_file` 的 `reason="completed"` 只表示服务器已完成写入；端到端完整性必须用对端长度和解码后哈希确认
 
 ## 验证与开发

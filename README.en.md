@@ -83,7 +83,9 @@ Reasonix installs both SKILLs with the plugin. Claude Code, Codex, and other age
 Important semantic boundaries:
 
 - `reason="idle"` only means that the byte stream became quiet; it does not mean that a command completed. Use `uart_expect` when a prompt or end marker is available.
+- When terminal input echo is enabled, a pattern contained in the command can make `uart_expect` match early. Disable echo or use an output marker whose complete pattern does not occur contiguously in the command text.
 - `overflow_delta > 0` means that ring-buffer data was overwritten, so the current read has a gap.
+- The overflow fields from `uart_send_file` are return-time snapshots. Check the latest `overflow_total` with `uart_available` or `uart_read` afterward; zero is not final proof that no overflow occurred.
 - `uart_send_file` returning `reason="completed"` only means that the server finished writing. Confirm end-to-end integrity with peer byte counts and a hash of the decoded content.
 
 ## Validation and Development

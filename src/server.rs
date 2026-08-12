@@ -49,7 +49,8 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
 - 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
 - 二进制使用 mode/read_mode="hex"；终端命令使用 mode="text"、显式 newline，并优先用 read_mode="text-escaped"。
-- 有提示符或结束标记时用 uart_expect；需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。
+- 有提示符或结束标记时用 uart_expect；终端开启回显时，data 中出现的 pattern 会先在命令回显里命中，应关闭回显或构造回显中不连续出现的输出锚点。
+- 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。
 - reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
 - 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
 - pattern 是大小写敏感的原始字节子串，不支持正则；历史未读数据会立即参与匹配。
@@ -58,6 +59,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 - 先确认本地 path 与目标设备均在用户授权范围内；服务端可读取进程有权访问的任意普通文件，不限制目录。
 - 按 uart_send_estimate → 准备对端 → uart_send_file 一次调用 → EOF/按长度结束 → 对端长度和哈希对账执行；不要循环 uart_write。
 - reason 只表示服务器端结束状态；completed 不代表对端完整接收。base64 的 sent_bytes 包含编码和换行，不能与 raw_bytes 直接比较。
+- send_file 的 overflow 字段是生成返回时的上行缓冲快照，0 不等于最终无溢出；返回后再调用 uart_available / uart_read 确认最新 overflow_total。
 - ser2mcp 不主动发送 EOF。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
 
 详细决策与故障处理见 ser2mcp-usage SKILL；文件/固件传输见 ser2mcp-file-transfer SKILL。"##;
@@ -186,7 +188,8 @@ pub struct CloseArgs {
 pub struct ExpectArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 要等待出现的非空字符串（hex 或 text，取决于 pattern_mode），编码后上限 65536 字节。
+    /// 要等待出现的非空原始字节子串（hex 或 text，取决于 pattern_mode），
+    /// 编码后上限 65536 字节；历史未读数据和终端输入回显都会参与匹配。
     pub pattern: String,
     /// pattern 编码：hex（默认）或 text。
     pub pattern_mode: Option<String>,
@@ -196,6 +199,7 @@ pub struct ExpectArgs {
     /// false 时纯等待（数据留在缓冲，后续可用 uart_read 取走）。
     pub consume: Option<bool>,
     /// 可选：等待前先发送的数据（"发送+等待"一步完成），编码取决于 mode。
+    /// 终端开启输入回显时，不要让该数据连续包含 pattern，否则可能提前命中回显。
     pub data: Option<String>,
     /// data 的编码：hex（默认）或 text。
     pub mode: Option<String>,
@@ -670,7 +674,7 @@ impl Ser2Mcp {
     /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
     /// / 客户端取消通知（notifications/cancelled）均可中止。
     #[tool(
-        description = "文件流式发送（port、path 必填）：读取 ser2mcp 进程有权访问的本地普通文件并分片发送到串口；服务端不限制目录，调用前须确认路径与目标设备均在用户授权范围内。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+        description = "文件流式发送（port、path 必填）：读取 ser2mcp 进程有权访问的本地普通文件并分片发送到串口；服务端不限制目录，调用前须确认路径与目标设备均在用户授权范围内。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。overflow 是生成返回时的上行缓冲快照，返回后须用 uart_available / uart_read 再确认最新 overflow_total。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
     )]
     async fn uart_send_file(
         &self,
@@ -850,10 +854,12 @@ impl Ser2Mcp {
 
     /// 等待串口输出中出现指定 pattern（内容匹配，替代 AI 侧 sleep+盲发 的时序编排）。
     /// 可选 `data` 实现"发送+等待"一步完成；命中（或超时）后返回。
+    /// 若终端开启输入回显且 `data` 本身含 pattern，命令回显可先于真实输出命中；
+    /// 调用方应关闭回显，或构造在回显中不连续出现、只在实际输出中出现的锚点。
     /// `consume=true`（默认）时取走并返回"截至 pattern 结尾"的内容，pattern 之后
     /// 的字节留在缓冲；`consume=false` 时纯等待、数据不消费（可用 uart_read 取走诊断）。
     #[tool(
-        description = "等待串口输出中出现指定 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。命中或超时后返回，consume=true（默认）时返回截至 pattern 结尾的内容。"
+        description = "等待串口输出中出现指定 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。命中或超时后返回，consume=true（默认）时返回截至 pattern 结尾的内容。pattern 是原始字节匹配；若终端开启输入回显且 data 含 pattern，命令回显会造成提前命中，应关闭回显或使用在回显中不连续出现的输出锚点。"
     )]
     async fn uart_expect(
         &self,

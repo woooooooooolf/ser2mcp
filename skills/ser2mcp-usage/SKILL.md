@@ -10,6 +10,7 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 - 按 `uart_list_ports → uart_open → 交互 → uart_close` 操作；重复打开同一端口前先关闭。
 - 除 `uart_list_ports` 和 `uart_send_estimate` 外，调用时都传 `port`。
 - 一次只发送一条命令，并用设备输出锚点判断完成；不要用 sleep 盲等。
+- 终端开启输入回显时，`data` 中的 pattern 会先在命令回显里命中。先 `stty -echo`，或让命令以分段字面量生成锚点，使完整 pattern 不连续出现在回显中。
 - 终端命令显式带行尾。通常用 `newline="crlf"`；已知设备只需 LF 时用 `lf`。
 - 把 `reason="idle"` 解释为“字节流暂时静默”，不要解释为命令已完成。
 - 检查每次读取结果的 `overflow_delta`；大于 0 表示数据已被覆盖，当前结果有缺口。
@@ -61,6 +62,7 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
   - `max_bytes`：未读数据达到 `max_bytes`；继续读取剩余数据。
   - `timeout`：总等待达到 `timeout_ms`；结合实际返回内容判断是否已有部分响应。
 - `uart_expect` 的 `matched=true` 才表示找到指定锚点。pattern 是大小写敏感的原始字节子串，不支持正则。
+- `matched=true` 只证明串口字节流出现了 pattern，不证明它来自命令的实际输出。若返回内容包含所发送的命令行，视为回显假阳性，继续等待真实锚点或修正终端/锚点后重试。
 - `consume=true`（默认）只消费到 pattern 结尾；pattern 之后的数据保留在缓冲，会进入后续读取。
 - 调用 `uart_expect` 时，缓冲中已有的历史数据立即参与匹配。需要只匹配新输出时，先读取或清理残留。
 - `overflow_delta > 0` 表示本次观察区间内有字节被覆盖；调大 `buffer_size` 或更频繁地读取，并重新获取关键数据。
@@ -70,6 +72,7 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - 命令停在行缓冲：补正确行尾；不要连续发送第二条命令，否则可能与残留拼接。
 - 长命令中途静默：等待提示符或命令特有结束标记，并把 `timeout_ms` 设到足以覆盖整个操作；不要依赖 `uart_exchange` 的 idle。
 - 提示符不可用：改用命令特有输出，如 `OK`、长度行或显式打印的结束标记。
+- 需要显式结束标记且不能关闭回显：把标记拆开写在命令中，例如等待 `SLEEP-DONE-MARK` 时发送 `sleep 8; printf '%s%s\n' 'SLEEP-DONE-' 'MARK'`。回显不含连续的完整 pattern，实际输出才包含。
 - 需要清除板端当前输入行：仅在确认 tty 为 icanon 时发送 `\x15`（Ctrl+U）；需要中断当前命令时可发送 `\x03`（Ctrl+C）。`uart_clear` 只清宿主缓冲，不清板端状态。
 - 输出缺失或设备拔出：调用 `uart_available` 检查 `read_error` 和 `overflow_total`。
 

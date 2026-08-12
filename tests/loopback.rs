@@ -9,6 +9,7 @@
 //! 覆盖（单测试函数顺序执行，避免多测试争用同一串口）：
 //! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
 //! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
+//! - 1KiB 小缓冲发送 64KiB → `uart_send_file` 直接报告上行覆盖增量
 //! - `uart_send_cancel` 并发中止传输（reason=cancelled + 部分进度）
 //! - `uart_close` 并发中断传输并关闭端口
 //! - 原始 JSON-RPC `notifications/cancelled` 通知中止传输（客户端取消路径）
@@ -117,10 +118,18 @@ async fn read_all_hex(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) -> Stri
 }
 
 async fn open_port(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) {
+    open_port_with_buffer(client, port, 1024 * 1024).await;
+}
+
+async fn open_port_with_buffer(
+    client: &rmcp::Peer<rmcp::RoleClient>,
+    port: &str,
+    buffer_size: usize,
+) {
     let r = call(
         client,
         "uart_open",
-        json!({"port": port, "baudrate": 115200}),
+        json!({"port": port, "baudrate": 115200, "buffer_size": buffer_size}),
     )
     .await
     .expect("uart_open 调用失败");
@@ -188,7 +197,39 @@ async fn loopback_send_file_all() {
     let decoded = STANDARD.decode(stripped).expect("base64 解码失败");
     assert_eq!(decoded, data, "base64 模式回环解码后不一致");
 
-    // ============ 场景 3：uart_send_cancel 并发中止 ============
+    // ============ 场景 3：小缓冲发送直接报告溢出 ============
+    let _ = call(&client, "uart_close", json!({"port": port}))
+        .await
+        .expect("uart_close 调用失败");
+    open_port_with_buffer(&client, &port, 1024).await;
+    let r = call(
+        &client,
+        "uart_send_file",
+        json!({"port": port, "path": tmp.path, "mode": "text", "chunk_size": 1024}),
+    )
+    .await
+    .expect("小缓冲 send_file 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    let send_overflow = v["overflow_delta"].as_u64().unwrap();
+    assert!(
+        send_overflow > 0,
+        "1KiB 缓冲回环 64KiB 应在 send_file 返回中报告覆盖: {v:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let r = call(&client, "uart_available", json!({"port": port}))
+        .await
+        .expect("uart_available 调用失败");
+    let available = r.structured_content.expect("应有结构化返回");
+    assert!(
+        available["overflow_total"].as_u64().unwrap() >= v["overflow_total"].as_u64().unwrap(),
+        "返回后尾部上行数据只能让累计溢出增长: send={v:?}, available={available:?}"
+    );
+    let _ = call(&client, "uart_close", json!({"port": port}))
+        .await
+        .expect("uart_close 调用失败");
+    open_port(&client, &port).await;
+
+    // ============ 场景 4：uart_send_cancel 并发中止 ============
     let _ = call(&client, "uart_clear", json!({"port": port}))
         .await
         .expect("uart_clear 调用失败");
@@ -235,7 +276,7 @@ async fn loopback_send_file_all() {
     assert_eq!(v["send"]["active"], json!(false));
     assert_eq!(v["send"]["last_reason"], json!("cancelled"));
 
-    // ============ 场景 4：uart_close 并发中断 ============
+    // ============ 场景 5：uart_close 并发中断 ============
     let client3 = client.clone();
     let port3 = port.clone();
     let path3 = tmp.path.clone();
@@ -273,13 +314,13 @@ async fn loopback_send_file_all() {
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false), "close 后端口应已关闭");
 
-    // ============ 场景 5：原始 JSON-RPC 取消通知（notifications/cancelled） ============
+    // ============ 场景 6：原始 JSON-RPC 取消通知（notifications/cancelled） ============
     raw_cancelled_notification_test(&port, &tmp.path).await;
 
     client.cancel().await.expect("关闭客户端失败");
 }
 
-/// 场景 5：手写 JSON-RPC 帧（Content-Length 头），验证 `notifications/cancelled`
+/// 场景 6：手写 JSON-RPC 帧（Content-Length 头），验证 `notifications/cancelled`
 /// 能中止进行中的 `uart_send_file`（rmcp 服务端收到取消通知会 cancel 请求级
 /// CancellationToken，发送循环在检查点退出）。
 async fn raw_cancelled_notification_test(port: &str, path: &std::path::Path) {

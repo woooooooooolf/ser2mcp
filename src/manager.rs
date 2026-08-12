@@ -343,9 +343,10 @@ pub struct SendFileOutcome {
     pub chunks: u64,
     /// 总耗时（毫秒）。
     pub elapsed_ms: u64,
-    /// 发送期间上行缓冲溢出增量（对账诊断用；发送文件场景通常为 0）。
+    /// 本次发送开始到返回快照之间，读线程已写入环形缓冲的溢出增量。
+    /// 串口驱动或线路中尚未搬入缓冲的上行字节可能让后续累计值继续增长。
     pub overflow_delta: u64,
-    /// 累计溢出字节数。
+    /// 生成返回快照时，环形缓冲的累计溢出字节数。
     pub overflow_total: u64,
     /// 读线程致命错误（`reason="device_error"` 时非空；正常为 `None`）。
     pub device_error: Option<String>,
@@ -608,14 +609,14 @@ impl SerialManager {
         ct: Option<&CancellationToken>,
     ) -> Result<SendFileOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (port, last_overflow, send, closing) = {
+        let (port, buffer, send, closing) = {
             let ports = self.ports.lock().unwrap();
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
             (
                 ap.port.clone(),
-                ap.last_overflow.clone(),
+                ap.buffer.clone(),
                 ap.send.clone(),
                 ap.closing.load(Ordering::SeqCst),
             )
@@ -623,7 +624,11 @@ impl SerialManager {
         if closing {
             return Err(format!("端口 {port_name} 正在关闭"));
         }
-        let overflow_before = *last_overflow.lock().unwrap();
+        // 文件发送不消费上行缓冲，也不应借用 last_overflow（读取工具的消费基线）
+        // 计算增量。直接对环形缓冲的单调累计计数取调用前后快照，才能报告发送期间
+        // 已被读线程观察到的覆盖。返回后，仍在串口驱动/线路中的字节可能继续推高
+        // overflow_total，调用方应再用 uart_available / uart_read 获取最终观察值。
+        let overflow_before = buffer.stats().1;
         let started = Instant::now();
         send.begin(total_bytes);
         let mut sent_bytes = 0u64;
@@ -699,7 +704,7 @@ impl SerialManager {
             }
         }
         send.finish(reason, sent_bytes, chunks_done);
-        let overflow_total = *last_overflow.lock().unwrap();
+        let overflow_total = buffer.stats().1;
         Ok(SendFileOutcome {
             reason: reason.into(),
             raw_bytes: total_bytes,
