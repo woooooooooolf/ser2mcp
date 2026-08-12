@@ -6,79 +6,32 @@
 
 简体中文 | [English](README.en.md)
 
-**UART 串口 MCP 服务器**：把本地串口设备封装成标准的 **MCP (Model Context Protocol) 工具**，让 AI 助手（Claude Desktop、Cursor 及任何 MCP 客户端）直接读写串口。
+ser2mcp 是一个本地 UART 串口 MCP 服务器，把串口枚举、配置、读写、输出匹配和文件发送封装为标准 MCP 工具，供支持 stdio MCP 的 AI 客户端调用。
 
-```mermaid
-flowchart LR
-    client["MCP 客户端<br>（AI 助手）"]
-    server["ser2mcp<br>（事件驱动读线程+环形缓冲）"]
-    uart["UART 设备<br>（TX-RX）"]
+## 核心能力
 
-    client <==>|"JSON-RPC over stdio"| server
-    server <==>|"串口"| uart
-```
+- 提供 14 个 `uart_*` 工具，支持多串口、运行时重配置、写后读取和按输出 pattern 编排时序
+- 后台持续读取串口数据，使用有界环形缓冲保存未读内容，并报告 `overflow_delta / overflow_total`
+- 支持 hex、UTF-8 text 和仅用于返回侧的 text-escaped，适配二进制协议与终端日志
+- 通过一次 `uart_send_file` 流式发送本地文件，支持连续 base64、进度查询、估算和取消
+- Windows、Linux、macOS 单可执行文件交付，无需安装 Rust 运行时
 
-## 特性
+## 安装与接入
 
-- **14 个 MCP 工具**：枚举端口、打开、运行时重配置、写、读、写+读、等待匹配输出、匹配后立即发送、状态、清缓冲、关闭、文件发送（估算/发送/取消）
-- **文件流式发送**：`uart_send_file` 一次调用把本地文件分片限速发送到串口（text 原样 / base64 跨分片连续编码、自动换行，padding 仅在文件末尾），替代模型逐块调 `uart_write`；配套 `uart_send_estimate` 耗时估算与 `uart_send_cancel` / `uart_close` / 客户端取消通知三级中止，发送中可查进度
-- **完整串口参数配置**：波特率 / 数据位(5-8) / 校验位(none/even/odd) / 停止位(1,2) / 流控(none/software/hardware) / 读超时，均可在 `uart_open` / `uart_configure` 中指定
-- **内部参数可配置**：环形缓冲大小 `buffer_size`（默认 1 MiB，上限 16 MiB）、空闲判定 `idle_ms`、单次拉取上限 `max_bytes`、总超时 `timeout_ms`（默认 5000ms，上限 5 分钟）、读线程超时 `read_timeout_ms`（默认 500ms，仅作读安全上限，不影响延迟）
-- **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
-- **上行数据持续缓冲**：事件驱动/非阻塞读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
-- **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本；`read_mode="text-escaped"` 文本为主、非文本字节 `\xNN` 转义（终端/日志场景不降级）
-- **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需安装 Rust 运行时
-
-## 快速安装
-
-> 也可以直接从 [Releases](https://github.com/woooooooooolf/ser2mcp/releases) 下载对应平台的预编译二进制（Windows / Linux / macOS）。
+可从 [Releases](https://github.com/woooooooooolf/ser2mcp/releases) 下载对应平台的预编译包，也可以从源码构建：
 
 ```bash
-# 1. 拉取仓库
 git clone https://github.com/woooooooooolf/ser2mcp.git
 cd ser2mcp
 
-# 2. Linux 系统依赖（仅 Debian/Ubuntu 需要；macOS/Windows 跳过）
+# Debian/Ubuntu 构建依赖；Windows/macOS 跳过
 sudo apt-get install -y libudev-dev
 
-# 3. 构建 release 二进制
 cargo build --release
-# 产物：target/release/ser2mcp（Windows 下为 ser2mcp.exe）
-
-# 4. 自检（可选）：枚举本机串口
 target/release/ser2mcp --list-ports
-
-# 5. 注册为 MCP server（见下方「接入 MCP 客户端」）
 ```
 
-**验证安装成功**：注册后调用 `uart_list_ports` 应返回本机串口列表（可能为空数组）；若有 TX-RX 回环硬件，调用 `uart_exchange` 发送的数据应原样返回。
-
-## 构建与测试
-
-> **Linux 用户注意**：`serialport` 枚举 USB 端口信息依赖 `libudev`，编译前需先安装
-> Debian/Ubuntu：`sudo apt-get install -y libudev-dev`
-
-```bash
-cargo build --release   # 构建
-cargo test              # 单元 + 端到端 MCP 协议测试（无需串口硬件）
-cargo doc --no-deps     # 生成 Rust 文档
-```
-
-## 命令行
-
-下载预编译二进制或构建完成后，可直接运行：
-
-```bash
-ser2mcp --list-ports   # 枚举本机串口
-ser2mcp --version      # 显示版本号
-ser2mcp --help         # 显示帮助
-```
-
-不带参数运行即进入 MCP stdio 服务模式（供 AI 助手调用）。
-
-## 接入 MCP 客户端
-
-MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json` / Claude Desktop 等）：
+不带参数运行 `ser2mcp` 即进入 MCP stdio 服务模式。通用客户端配置：
 
 ```json
 {
@@ -91,160 +44,69 @@ MCP 客户端以 stdio 方式启动 server 子进程。通用配置（`.mcp.json
 }
 ```
 
-Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
+Windows 路径示例：`"command": "C:\\tools\\ser2mcp.exe"`。日志写入 stderr，可用 `RUST_LOG` 调整级别，默认 `info`。
 
-### 以 Reasonix 插件包安装（推荐，零手动配置）
+### Reasonix 插件安装
 
-在 Reasonix 中执行：
+仓库根目录包含 `reasonix-plugin.json`，`bin/` 内含三平台预编译文件与跨平台启动脚本。在 Reasonix 中让 Agent 执行：
 
 > Install the ser2mcp plugin package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="auto" (or "plugin").
 
-仓库根目录的 `reasonix-plugin.json` 将 ser2mcp 声明为标准 MCP 服务器（`bin/` 内含 Windows / Linux / macOS 三平台预编译二进制与跨平台启动脚本）：
+安装后调用 `uart_list_ports` 验证；返回空数组也表示服务器已正常工作，只是当前没有可枚举串口。离线安装时下载完整源码仓库，并把仓库目录作为 `install_source` 的本地路径。
 
-1. 在 Reasonix 中执行 `install_source`：**源填仓库 URL** `https://github.com/woooooooooolf/ser2mcp`，kind 用 `auto`（自动识别为插件包）或显式 `plugin`，scope 默认 `global`
-2. Reasonix 把整个仓库复制到自己的全局插件目录（Windows 为 `%APPDATA%\reasonix\plugins\ser2mcp`），manifest 里的 `command`（相对路径 `bin/ser2mcp.cmd`）按插件包根目录解析——**无需手动改任何路径**
-3. 安装后自动注册名为 `ser2mcp` 的 MCP 服务器，工具以 `mcp__ser2mcp__uart_*` 暴露
-4. **验证**：调用 `uart_list_ports`，应返回本机串口列表（可能为空数组）
+## 工具
 
-> `bin/ser2mcp.cmd` 是跨平台启动脚本（Unix 按 `uname` 选 `ser2mcp` / `ser2mcp-macos`，Windows 直接调用 `ser2mcp.exe`；注意保持纯 ASCII，cmd.exe 在非 UTF-8 代码页下解析非 ASCII 字节会出错）。
->
-> 离线安装：将完整源码仓库下载到本地，并将仓库目录作为 `install_source` 的本地路径。
-
-环境变量（可选）：
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `RUST_LOG` | `info` | 日志级别（日志输出到 **stderr**，不污染 stdio 协议通道） |
-
-## 工具一览
-
-| 工具 | 说明 |
+| 工具 | 用途 |
 |---|---|
-| `uart_list_ports` | 枚举本机可用串口（名称/类型/USB 描述） |
-| `uart_open` | 打开串口并启动读线程（`port` 必填；含全部串口参数 + `buffer_size` 等内部参数） |
-| `uart_configure` | 运行时重配置（`port` 必填，仅更新传入项） |
-| `uart_write` | 发送数据，立即返回（`port` 必填，不等回复） |
-| `uart_read` | 拉取上行缓冲（`port` 必填） |
-| `uart_exchange` | 发送 + 读取在同一 I/O 临界区一步完成（`port` 必填；不会被其它工具插入；短命令、idle 收尾） |
-| `uart_expect` | 等待匹配输出：阻塞直到串口输出中出现指定 pattern 或超时（`port`、`pattern` 必填；可选 `data` 实现"发送+等待"） |
-| `uart_expect_send` | 匹配后立即发送：等待 pattern 出现后在同一临界区内发送 reply（`port`、`pattern`、`reply` 必填） |
-| `uart_available` | 状态快照：配置、缓冲未读字节数、累计溢出、读线程错误、文件发送进度（`port` 必填） |
-| `uart_clear` | 清空未读缓冲（`port` 必填） |
-| `uart_close` | 关闭串口并释放句柄（`port` 必填；目标端口正在发送文件时先取消并等待退出，30 秒兜底） |
-| `uart_send_estimate` | 估算文件发送字节数与耗时（`path` 必填；无需打开串口，`baudrate` 默认 115200） |
-| `uart_send_file` | 文件流式发送：分片限速发送本地文件到串口，一次调用（`port`、`path` 必填） |
-| `uart_send_cancel` | 中止进行中的文件发送（`port` 必填；无传输时为 no-op） |
+| `uart_list_ports` | 枚举串口名称、类型与 USB 描述 |
+| `uart_open` / `uart_configure` / `uart_close` | 打开、运行时重配置和关闭端口 |
+| `uart_write` | 只发送数据，不等待回复 |
+| `uart_read` | 按 idle、字节上限或总超时拉取上行缓冲 |
+| `uart_exchange` | 在同一 I/O 临界区完成短命令的写入与 idle 收尾读取 |
+| `uart_expect` | 可选发送数据，并等待输出出现指定 pattern |
+| `uart_expect_send` | 命中 pattern 后立即发送 reply |
+| `uart_available` / `uart_clear` | 查询状态、溢出、错误与发送进度；清空未读缓冲 |
+| `uart_send_estimate` | 无需打开串口，估算文件发送字节数和耗时 |
+| `uart_send_file` / `uart_send_cancel` | 一次调用流式发送本地文件；请求取消传输 |
 
-> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄；除 `uart_list_ports` 和无需打开串口的 `uart_send_estimate` 外，其余工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
+除 `uart_list_ports` 和 `uart_send_estimate` 外，其余工具都需要 `port`。端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄。普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间这些调用会排队，`uart_available` / `uart_clear` 仍可并发执行。
 
-> **并发与资源边界**：普通 I/O、配置、期待与关闭调用通过全局 I/O 锁串行化；文件发送期间这些调用会排队。`uart_available` / `uart_clear` 可并发执行，`uart_send_cancel` 可请求取消；目标端口的 `uart_close` 会主动取消发送并等待退出。串口波特率范围 50–4000000；`buffer_size` 上限 16 MiB，`chunk_size` 上限 1 MiB，read/exchange/expect 的 `timeout_ms` 上限 300000ms，expect pattern 编码后上限 64 KiB，`gap_ms` 上限 60000ms。
+## AI 使用指南
 
-### 使用说明（AI Agent 阅读）
+仓库内含两个通用 Agent Skills：
 
-完整使用指南以插件自带 SKILL 形式提供，AI Agent 会话中按需加载（详见"AI Agent 兼容"）：
+- [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md)：工具选择、编码、命令完成判定、缓冲与故障处理
+- [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md)：文件发送授权、估算、接收端准备、EOF、取消和端到端对账
 
-- `ser2mcp-usage`：工具速查、数据表示与编码选择、读取/expect 语义、命令完成判定、故障排查
-- `ser2mcp-file-transfer`：文件流式发送完整流程（估算/发送/EOF/对账、对端 tty 注意事项）
+Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等 Agent 可把 `skills/` 挂载到各自的技能目录。
 
-**快速要点**（完整语义以 SKILL 为准）：
+最重要的语义边界：
 
-- 编码：`hex`（默认，二进制安全）/ `text`（UTF-8）/ `text-escaped`（仅返回侧，控制字节转义为 `\xNN`）；终端命令务必 `newline="crlf"` 带行尾，否则命令不执行且残留行缓冲会与下一条命令拼合
-- 读取：`uart_read` / `uart_exchange` 在空闲判定（`idle_ms` 默认 300ms，应大于设备响应间隙）/ 达到上限（`max_bytes` 默认 64 KiB）/ 总超时（`timeout_ms` 默认 5000ms）之一满足时返回；`overflow_delta > 0` 表示缓冲溢出、数据有缺口
-- 完成判定：用 `uart_expect` 等输出锚点（如 `"# "`、`"Zynq>"`），命中即返回（毫秒级），不要 sleep 盲等或加大 timeout 干等；提示符因设备而异，不可用（echo 关闭/无提示符设备）时改用命令特有结束标记。长命令（wget/tar 解包等）的 `uart_expect` 与 idle 无关，其 `timeout_ms` 只是兜底上限（上限 5 分钟、命中即提前返回），可放大到覆盖整个命令时长
-- 大文件：`uart_send_estimate` → `uart_send_file` 一次调用（勿逐块 `uart_write`），完成后与对端 `wc -c` / `md5sum` 对账
+- `reason="idle"` 只表示字节流静默，不表示命令已完成；有提示符或结束标记时使用 `uart_expect`
+- `overflow_delta > 0` 表示环形缓冲已有数据被覆盖，当前读取结果存在缺口
+- `uart_send_file` 的 `reason="completed"` 只表示服务器已完成写入；端到端完整性必须用对端长度和解码后哈希确认
 
-**常用示例**：
-
-```
-uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  # 终端命令
-uart_exchange {port: "COM3", data: "AT\r\n", mode: "text"}                                            # AT 指令
-uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex"}                                   # 二进制帧
-uart_expect    {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}  # 发送+等提示符收尾一步完成
-uart_expect    {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}                                 # 等待提示符
-uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}           # 命中即按键
-```
-
-### AI Agent 兼容
-
-SKILL 使用通用 Agent Skills 格式（`SKILL.md`，frontmatter 含 `name` / `description`），可跨工具使用：
-
-- **Reasonix**：插件安装即获得，以 `/ser2mcp:ser2mcp-usage`、`/ser2mcp:ser2mcp-file-transfer` 命名空间调用，或由 Agent 按 `description` 自动选择
-- **Claude Code / Codex**：将仓库 `skills/` 目录挂载为 `.claude/skills/`（或 `.codex/skills/`）即可直接使用
-
-### 典型用法（AI 助手视角）
-
-```
-1. uart_list_ports                      → 定位 "COM3"
-2. uart_open {port: "COM3", baudrate: 115200}
-3. uart_exchange {port: "COM3", data: "41 54 0D 0A"}  → AT 指令（hex）
-4. uart_exchange {port: "COM3", data: "ls /", mode: "text", newline: "crlf", read_mode: "text-escaped"}  → 终端命令
-5. uart_expect {port: "COM3", pattern: "Zynq>", pattern_mode: "text"}  → 等待提示符（时序编排）
-6. uart_expect_send {port: "COM3", pattern: "Hit any key", reply: "\n", reply_mode: "text", pattern_mode: "text"}  → 抢 bootdelay 窗口
-7. uart_configure {port: "COM3", baudrate: 9600}      → 设备切换波特率后重配置
-8. uart_close {port: "COM3"}
-```
-
-文件传输场景（大文件用 `uart_send_file`，勿逐块 `uart_write`；完整流程见 SKILL `ser2mcp-file-transfer`）：
-
-```
-uart_send_estimate {path: "C:/tmp/fw.bin", mode: "base64"}            → 先估算耗时
-uart_exchange {port: "COM3", data: "stty -echo; cat > /tmp/f.b64", mode: "text", newline: "lf"}  → 对端开始接收
-uart_send_file {port: "COM3", path: "C:/tmp/fw.bin", mode: "base64"}  → 一次发送
-uart_write {port: "COM3", data: "04"}                                  → 补 \x04 结束对端 cat（EOF）
-uart_exchange {port: "COM3", data: "wc -c /tmp/f.b64; base64 -d < /tmp/f.b64 | md5sum", mode: "text", newline: "lf"}  → 编码字节数与 sent_bytes 对账；解码后哈希与原文件对账
-```
-
-## 回环自测（真实硬件，TX-RX 短接）
-
-内置一键自测工具：枚举串口 + 对指定端口做完整回环验证（发送 0x00-0xFF 全字节序列并校验原样返回）：
+## 验证与开发
 
 ```bash
-cargo run --release --example loopback -- --list      # 枚举本机串口
-cargo run --release --example loopback -- COM3 115200 # 回环测试
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo doc --no-deps
 ```
 
-## 模块结构
+真实硬件 TX-RX 回环测试：
 
-```
-src/
-├── main.rs      # 入口：stdio 传输启动
-├── lib.rs       # crate 文档与模块声明
-├── hex.rs       # hex 编解码（hex/text/text-escaped 三模式）
-├── ring.rs      # 有界环形缓冲（覆盖最旧 + 溢出计数 + Notify 唤醒 + pattern 查找）
-├── sendfile.rs  # 文件流式发送（分块 + base64 编码 + 耗时估算）
-├── manager.rs   # 串口管理器（打开/重配置/读线程/写/拉取/期待匹配/文件发送）
-├── reader.rs    # 事件驱动/非阻塞读线程（平台适配层）
-└── server.rs    # MCP 工具层（14 个工具 + ServerHandler）
-tests/
-├── e2e.rs       # 端到端 MCP 协议测试（子进程真实握手，无硬件）
-└── loopback.rs  # 真实硬件回环测试（#[ignore]，SER2MCP_LOOPBACK_PORT 指定端口）
-scripts/
-└── mcp_cli.py   # 轻量 MCP stdio 命令行客户端（动作序列批量调用）
-skills/
-├── ser2mcp-usage/         # AI 使用指南 SKILL：工具速查/编码/读取语义/故障排查
-└── ser2mcp-file-transfer/ # 文件流式发送 SKILL：估算/发送/EOF/对账/对端 tty 注意事项
-examples/
-├── loopback.rs      # 回环自测工具
-└── latency_probe.rs # 延迟探针（bench/benchw，真实硬件压测）
+```bash
+cargo run --release --example loopback -- --list
+cargo run --release --example loopback -- COM3 115200
 ```
 
-## 技术栈
+Linux 无权打开 `/dev/ttyUSB0` 时，以 root 运行 `scripts/linux-serial-permissions.sh`，然后注销并重新登录。Windows 枚举不到端口时，检查 CH340、CP210x 等 USB 转串口驱动。
 
-- [rmcp](https://github.com/modelcontextprotocol/rust-sdk)（官方 Rust MCP SDK）
-- [serialport](https://crates.io/crates/serialport)
-- tokio / serde / schemars
+## 安全
 
-## 安全提示
-
-ser2mcp 会把串口读写和本地文件发送能力直接交给 AI 助手：已授权的 MCP 客户端（以及背后的模型）可以向设备发送任意字节；`uart_send_file` 还可以读取进程有权访问的任意普通文件并经串口发出，服务端不限制文件目录。请使用权限受限的账户运行，只连接可信设备，并在发送文件前确认路径与目标设备均在用户授权范围内。完整说明见 [SECURITY.md](SECURITY.md)。
-
-## 常见问题
-
-- **Linux 下提示权限不足 / 无法打开 `/dev/ttyUSB0`**：当前用户不在 `dialout`（或 `uucp`）组。以 root 运行 `scripts/linux-serial-permissions.sh`，注销并重新登录后生效。
-- **端口打开失败 / 提示已被占用**：确认没有其他串口终端或 MCP 实例占用该端口。
-- **Windows 下枚举不到串口**：检查 CH340 / CP210x 等 USB 转串口驱动是否已安装。
-- **工具调用延迟偏高**：单次读写往返的固定等待主要来自 `idle_ms`（默认 300ms）；可按设备响应节奏调小（例如 50ms）。`read_timeout_ms`（默认 500ms）只是读安全上限，不影响延迟。
-- **数据不完整或缺失**：返回值 `overflow_delta > 0` 表示缓冲溢出丢数据，应调大 `buffer_size` 或减小拉取间隔。
+ser2mcp 会把串口读写和本地文件发送能力交给 AI 客户端。`uart_send_file` 可以读取 ser2mcp 进程有权访问的任意普通文件并经串口发出，服务端不限制目录。请使用权限受限的账户运行，只连接可信设备，并在发送文件前确认路径与目标设备均在用户授权范围内。完整说明见 [SECURITY.md](SECURITY.md)。
 
 ## License
 

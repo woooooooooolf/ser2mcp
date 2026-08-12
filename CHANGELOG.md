@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Docs
+
+- 精简中英文 README，聚焦安装、接入、工具能力、AI 使用入口、安全边界与验证流程
+- 重构 `ser2mcp-usage` / `ser2mcp-file-transfer` SKILL，按约束、决策、执行和结果判定组织，减少 Agent 上下文开销
+- 精简 MCP initialize 指引，并修正工具参数、文件发送完整性、估算耗时和本地文件访问范围等表述
+
 ## [0.8.2] - 2026-08-11
 
 ### Fixed
