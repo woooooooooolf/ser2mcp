@@ -27,7 +27,7 @@ flowchart LR
 - **事件驱动/非阻塞读线程（平台适配层）**：Unix（Linux/macOS）用 `poll(2)` + 自建管道事件驱动；Windows 用 1ms 轮询 + `bytes_to_read()` 门控 + `timeBeginPeriod(1)`，仅在数据就绪时 `read()`，读写延迟不再受读超时参数影响
 - **上行数据持续缓冲**：事件驱动/非阻塞读线程持续把串口数据囤积进环形缓冲；写满后覆盖最旧数据并**累计溢出计数**，返回值带 `overflow_delta / overflow_total`，数据缺口可检测
 - **二进制安全**：数据以 hex 字符串传递（如 `"41 54 0D 0A"`），`mode="text"` 可切换 UTF-8 文本；`read_mode="text-escaped"` 文本为主、非文本字节 `\xNN` 转义（终端/日志场景不降级）
-- **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需额外运行时
+- **单二进制交付**：`cargo build --release` 产出单个可执行文件，Windows / Linux / macOS 均无需安装 Rust 运行时
 
 ## 快速安装
 
@@ -135,7 +135,7 @@ Windows 示例：`"command": "C:\\tools\\ser2mcp.exe"`。
 | `uart_send_file` | 文件流式发送：分片限速发送本地文件到串口，一次调用（`port`、`path` 必填） |
 | `uart_send_cancel` | 中止进行中的文件发送（`port` 必填；无传输时为 no-op） |
 
-> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄，除 `uart_list_ports` 外每个工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
+> **多端口与透传**：支持同时打开多个串口，端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄；除 `uart_list_ports` 和无需打开串口的 `uart_send_estimate` 外，其余工具都要指定 `port`。串口字节流**原样透传**：ser2mcp 不做内容解析或过滤（`uart_expect` / `uart_expect_send` 仅在缓冲中做条件查找、不修改数据），非预期数据也会原样返回，由 AI 与上层自行判断。
 
 > **并发与资源边界**：普通 I/O、配置、期待与关闭调用通过全局 I/O 锁串行化；文件发送期间这些调用会排队。`uart_available` / `uart_clear` 可并发执行，`uart_send_cancel` 可请求取消；目标端口的 `uart_close` 会主动取消发送并等待退出。串口波特率范围 50–4000000；`buffer_size` 上限 16 MiB，`chunk_size` 上限 1 MiB，read/exchange/expect 的 `timeout_ms` 上限 300000ms，expect pattern 编码后上限 64 KiB，`gap_ms` 上限 60000ms。
 

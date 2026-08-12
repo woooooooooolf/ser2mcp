@@ -27,7 +27,7 @@ flowchart LR
 - **Event-driven / non-blocking reader thread (platform adaptation layer)**: Unix (Linux/macOS) uses `poll(2)` + self-pipe events; Windows uses 1ms polling + `bytes_to_read()` gating + `timeBeginPeriod(1)`, calling `read()` only when data is ready, so read/write latency is decoupled from the read-timeout parameter
 - **Continuous ingress buffering**: the event-driven reader thread continuously buffers serial data into a ring buffer; when full, the oldest data is overwritten and an **overflow counter** is incremented. Return values carry `overflow_delta / overflow_total`, so data gaps are detectable
 - **Binary-safe**: data travels as hex strings (e.g. `"41 54 0D 0A"`); `mode="text"` switches to UTF-8 text; `read_mode="text-escaped"` keeps text primary and escapes non-text bytes as `\xNN` (no fallback for terminal/log scenarios)
-- **Single-binary delivery**: `cargo build --release` produces one executable; Windows / Linux / macOS — no extra runtime required
+- **Single-binary delivery**: `cargo build --release` produces one executable; no Rust runtime installation is required on Windows, Linux, or macOS
 
 ## Quick Install
 
@@ -135,7 +135,7 @@ Environment variables (optional):
 | `uart_send_file` | Streaming file send: send a local file to the port in rate-limited chunks, one call (`port`, `path` required) |
 | `uart_send_cancel` | Abort an in-flight `uart_send_file` (`port` required; no-op when idle) |
 
-> **Multi-port & pass-through**: multiple ports can be open at the same time; the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle, and every tool except `uart_list_ports` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
+> **Multi-port & pass-through**: multiple ports can be open at the same time, and the port name (e.g. `COM3`, `/dev/ttyUSB0`) is the handle. Every tool except `uart_list_ports` and the port-independent `uart_send_estimate` requires a `port` argument. The byte stream is passed through **as-is**: ser2mcp does not parse or filter content (`uart_expect` / `uart_expect_send` only search the buffer conditionally without modifying data), so unexpected data is returned unchanged for the AI / upper layer to interpret.
 
 > **Concurrency & resource limits**: ordinary I/O, configuration, expect, and close calls are serialized by one global I/O lock, so they queue during a file send. `uart_available` / `uart_clear` remain concurrent, `uart_send_cancel` requests cancellation, and `uart_close` actively cancels a send on its target port before waiting for it to exit. Serial baudrate range: 50–4000000. Other limits: `buffer_size` 16 MiB, `chunk_size` 1 MiB, read/exchange/expect `timeout_ms` 300000ms, encoded expect pattern 64 KiB, and `gap_ms` 60000ms.
 

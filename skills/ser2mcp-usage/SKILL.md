@@ -26,7 +26,7 @@ ser2mcp 是 MCP 串口服务器：把本地串口暴露为 MCP 工具，字节�
 | `uart_send_file` | 文件流式发送（大文件一次调用，见 ser2mcp-file-transfer） |
 | `uart_send_cancel` | 中止进行中的文件发送 |
 
-端口名（`COM3` / `/dev/ttyUSB0`）即句柄；除 `uart_list_ports` 外每个工具都要传 `port`。重复打开同一端口会报错，先 `uart_close` 再开。
+端口名（`COM3` / `/dev/ttyUSB0`）即句柄；除 `uart_list_ports` 和 `uart_send_estimate` 外，其余工具都要传 `port`。重复打开同一端口会报错，先 `uart_close` 再开。
 
 ## 2. 标准工作流
 

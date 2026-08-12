@@ -331,7 +331,7 @@ impl SendState {
 /// `uart_send_file` 的返回统计。
 #[derive(Debug, serde::Serialize)]
 pub struct SendFileOutcome {
-    /// 结束原因：completed（全部发完）/ cancelled（被 `uart_send_cancel`、
+    /// 结束原因：completed（全部输出已写入串口驱动）/ cancelled（被 `uart_send_cancel`、
     /// `uart_close` 或客户端取消通知中止）/ device_error（读线程致命错误，
     /// 如串口设备物理断开）。
     pub reason: String,

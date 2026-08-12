@@ -16,10 +16,10 @@ description: 串口文件流式发送指南：uart_send_estimate/uart_send_file/
 3. uart_send_file {port, path, mode?, chunk_size?, gap_ms?}
    → 一次调用发送
 4. 结束传输（EOF，见 §4）
-5. 对账：wc -c / md5sum 与返回统计比对（见 §5）
+5. 对账：wc -c / md5sum 与返回统计比对（见 §4）
 ```
 
-大文件耗时可能很长（1 MiB @ 115200 ≈ 87 秒），务必先估算并提示用户预期等待。
+大文件耗时可能很长（1 MiB @ 115200：text 理论下限约 91 秒，base64 约 123 秒，均未计额外开销），务必先估算并提示用户预期等待。
 
 ## 2. 参数语义
 
@@ -37,10 +37,10 @@ description: 串口文件流式发送指南：uart_send_estimate/uart_send_file/
 
 `uart_send_file` 返回：`reason` / `raw_bytes` / `sent_bytes` / `chunks` / `elapsed_ms` / `overflow_delta` / `overflow_total` / `device_error`。
 
-- `reason="completed"`：全部发完。
-- `reason="cancelled"`：被 `uart_send_cancel`、`uart_close` 或客户端取消通知（`notifications/cancelled`）中止——按 `sent_bytes` 对账后决定是否重发。
+- `reason="completed"`：发送循环已把全部输出字节写入串口驱动；不代表对端已经完整接收。
+- `reason="cancelled"`：被 `uart_send_cancel`、`uart_close` 或客户端取消通知（`notifications/cancelled`）中止——检查对端已收内容后决定是否清理并重发。
 - `reason="device_error"`：读线程检测到致命错误（串口物理断开/硬件故障）——写侧可能仍"假成功"（数据进驱动缓冲但设备已不在），**以此为准**并做对端对账；`device_error` 含详情。
-- 完整性以 `reason` 为准：`raw_bytes` 是原文件总字节数，`sent_bytes` 是实际写入串口的字节数；base64 下后者包含编码与换行，不能通过两者大小关系判断是否发完。
+- `reason` 只表示服务器端的结束状态：`raw_bytes` 是原文件总字节数，`sent_bytes` 是实际写入串口的字节数；base64 下后者包含编码与换行，不能通过两者大小关系判断是否发完。端到端完整性必须用对端字节数与解码后哈希确认。
 - 中途写失败/文件读取失败：返回错误，错误信息含已发送字节/片数。
 - 发送期间 `uart_available` 可并发查询 `send` 进度（`active` / `sent_bytes` / `total_bytes` / `chunks` / `last_reason`），`uart_clear` 也可并发执行，普通 I/O/配置/期待工具会排队；`uart_send_cancel` 可请求取消，目标端口的 `uart_close` 会主动取消并等待发送退出（最长 30 秒），然后关闭端口。
 
