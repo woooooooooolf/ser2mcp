@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 将 Reasonix 插件入口从无法被 Unix `exec` 直接启动的 polyglot `.cmd` 改为无扩展名入口：Windows 解析同名 `.exe`，Linux/macOS 通过标准 POSIX shebang 启动对应二进制
+
 ## [0.8.4] - 2026-08-12
 
 ### Fixed

@@ -11,7 +11,7 @@
     ],
     "mcpServers": {
       "ser2mcp": {
-        "command": "bin/ser2mcp.cmd"
+        "command": "bin/ser2mcp"
       }
     }
   }

@@ -48,7 +48,7 @@ Windows 路径示例：`"command": "C:\\tools\\ser2mcp.exe"`。日志写入 stde
 
 ### Reasonix 插件安装
 
-仓库根目录包含 `reasonix-plugin.json`，`bin/` 内含三平台预编译文件与跨平台启动脚本。在 Reasonix 中让 Agent 执行：
+仓库根目录包含 `reasonix-plugin.json`，`bin/` 内含三平台预编译文件与 POSIX 启动脚本。Manifest 统一使用 `bin/ser2mcp`：Windows 自动解析同名 `ser2mcp.exe`，Linux/macOS 由脚本选择对应二进制。在 Reasonix 中让 Agent 执行：
 
 > Install the ser2mcp plugin package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="auto" (or "plugin").
 

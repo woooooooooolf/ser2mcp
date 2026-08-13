@@ -48,7 +48,7 @@ Windows path example: `"command": "C:\\tools\\ser2mcp.exe"`. Logs go to stderr; 
 
 ### Reasonix Plugin Install
 
-The repository root contains `reasonix-plugin.json`; `bin/` contains prebuilt files for all three platforms plus the cross-platform launcher. Ask the Reasonix agent to run:
+The repository root contains `reasonix-plugin.json`; `bin/` contains prebuilt files for all three platforms plus a POSIX launcher. The manifest consistently uses `bin/ser2mcp`: Windows resolves the matching `ser2mcp.exe`, while Linux/macOS use the script to select their platform binary. Ask the Reasonix agent to run:
 
 > Install the ser2mcp plugin package from https://github.com/woooooooooolf/ser2mcp. Use install_source with kind="auto" (or "plugin").
 

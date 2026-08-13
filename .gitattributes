@@ -3,3 +3,7 @@
 *.cmd text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+/bin/ser2mcp text eol=lf
+/bin/ser2mcp-linux binary
+/bin/ser2mcp-macos binary
+/bin/ser2mcp.exe binary
