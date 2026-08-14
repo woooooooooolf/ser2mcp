@@ -67,9 +67,9 @@ Windows 路径示例：`"command": "C:\\tools\\ser2mcp.exe"`。日志写入 stde
 | `uart_expect_send` | 命中 pattern 后立即发送 reply |
 | `uart_available` / `uart_clear` | 查询状态、溢出、错误与发送进度；清空未读缓冲 |
 | `uart_send_estimate` | 无需打开串口，估算文件发送字节数和耗时 |
-| `uart_send_file` / `uart_send_cancel` | 一次调用流式发送本地文件；请求取消传输 |
+| `uart_send_file` / `uart_send_cancel` | 同步阻塞地流式发送本地文件；请求取消仍在进行的传输 |
 
-除 `uart_list_ports` 和 `uart_send_estimate` 外，其余工具都需要 `port`。端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄。普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间这些调用会排队，`uart_available` / `uart_clear` 仍可并发执行。
+除 `uart_list_ports` 和 `uart_send_estimate` 外，其余工具都需要 `port`。端口名（如 `COM3`、`/dev/ttyUSB0`）就是句柄。普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间这些调用会排队，`uart_available` / `uart_clear` 仍可并发执行。宿主允许并发调用或后续任务仍能访问同一服务时，可用 `uart_send_cancel` 请求取消仍在进行的发送。
 
 ## AI 使用指南
 
@@ -84,12 +84,14 @@ Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等
 
 - `reason="idle"` 只表示字节流静默，不表示命令已完成；有提示符或结束标记时使用 `uart_expect`
 - `uart_exchange` 会返回调用前已有的历史缓冲，但只有观察到本次写入后的新上行数据，才允许按 idle 或字节上限收尾
-- 终端开启输入回显时，命令中包含的 pattern 会让 `uart_expect` 提前命中；关闭回显，或使用完整 pattern 不连续出现在命令文本中的输出锚点
+- `matched=true` 只证明匹配范围内出现了原始字节 pattern，不代表设备事务成功；终端用提示符/输出标记，AT 或无回显 MCU 用状态码/事务标识，二进制协议用帧字段与校验
+- `uart_expect.match_scope="buffer"`（默认）允许历史未读数据参与匹配；只等待调用后的新数据时用 `"new"`。对开启输入回显的终端，关闭回显或使用完整 pattern 不连续出现在命令文本中的输出锚点
 - `uart_expect_send.newline` 作用于 `reply`；终端回复可传 `reply_mode="text"` 和 `newline="crlf"`，不需要把行尾嵌入 reply 文本
 - `uart_expect` 默认只消费到 pattern 结尾；仅当返回的 `buffered_bytes > 0` 或确实需要 pattern 后的尾部输出时，再补一次 `uart_read`
 - 带参数工具的未知字段会报错，不再静默忽略；`buffer_size` 只能在 `uart_open` 时设置，需调整时先关闭再重新打开端口
 - `overflow_delta > 0` 表示环形缓冲已有数据被覆盖，当前读取结果存在缺口
 - `uart_send_file` 的 overflow 是返回时快照；返回后用 `uart_available` / `uart_read` 再确认最新 `overflow_total`，0 不代表最终无溢出
+- `uart_send_file` 默认同步阻塞至结束；可选 `max_duration_ms` 只在显式设置时自动止损并返回 `reason="duration_limit"`，通常仍应根据估算等待完成
 - `uart_send_file` 的 `reason="completed"` 只表示服务器已完成写入；端到端完整性必须用对端长度和解码后哈希确认
 
 ## 验证与开发

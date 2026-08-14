@@ -126,6 +126,34 @@ async fn e2e_tool_registration_and_errors() {
             .is_some(),
         "uart_expect_send Schema 应暴露 newline"
     );
+    assert!(
+        expect_send_tool.input_schema["properties"]
+            .get("match_scope")
+            .is_some(),
+        "uart_expect_send Schema 应暴露 match_scope"
+    );
+    let expect_tool = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "uart_expect")
+        .expect("缺少 uart_expect");
+    assert!(
+        expect_tool.input_schema["properties"]
+            .get("match_scope")
+            .is_some(),
+        "uart_expect Schema 应暴露 match_scope"
+    );
+    let send_file_tool = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "uart_send_file")
+        .expect("缺少 uart_send_file");
+    assert!(
+        send_file_tool.input_schema["properties"]
+            .get("max_duration_ms")
+            .is_some(),
+        "uart_send_file Schema 应暴露 max_duration_ms"
+    );
 
     // 2. uart_list_ports：无硬件也应成功（返回数组，可能为空）
     let r = call(&client, "uart_list_ports", json!({}))
@@ -290,6 +318,23 @@ async fn e2e_tool_registration_and_errors() {
     .await;
     assert!(r.is_err(), "非法 pattern_mode 应触发 invalid_params");
 
+    // match_scope 只接受 buffer/new；合法的 new 应继续进入端口检查。
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "match_scope": "future"}),
+    )
+    .await;
+    assert!(r.is_err(), "非法 match_scope 应触发 invalid_params");
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "match_scope": "new", "timeout_ms": 100}),
+    )
+    .await
+    .expect("合法 match_scope 应进入端口检查");
+    assert!(r.is_error.unwrap_or(false));
+
     // 17. 参数校验：timeout_ms 超上限 → 协议级 invalid_params
     let r = call(
         &client,
@@ -453,7 +498,19 @@ async fn e2e_text_escaped_and_newline_params() {
     .await;
     assert!(r.is_err(), "空 reply + newline 仍应触发 invalid_params");
 
-    // 9. 所有参数对象都应拒绝未知字段，防止拼错或传给不支持的工具时静默忽略。
+    // 9. expect_send 的 match_scope 同样只接受 buffer/new。
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41", "reply": "42", "match_scope": "future"}),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "非法 expect_send match_scope 应触发 invalid_params"
+    );
+
+    // 10. 所有参数对象都应拒绝未知字段，防止拼错或传给不支持的工具时静默忽略。
     let r = call(
         &client,
         "uart_configure",
@@ -568,7 +625,7 @@ async fn e2e_send_file_params_and_errors() {
     let r = call(
         &client,
         "uart_send_file",
-        json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path}),
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "max_duration_ms": 1000}),
     )
     .await
     .expect("send_file 调用失败");
@@ -601,6 +658,10 @@ async fn e2e_send_file_params_and_errors() {
         (
             json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "mode": "hex"}),
             "非法 mode",
+        ),
+        (
+            json!({"port": "COM_SER2MCP_NONEXISTENT", "path": tmp.path, "max_duration_ms": 0}),
+            "max_duration_ms=0",
         ),
     ] {
         let r = call(&client, "uart_send_file", args).await;

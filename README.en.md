@@ -67,9 +67,9 @@ Verify the installation with `uart_list_ports`. An empty array still means the s
 | `uart_expect_send` | Send a reply immediately after a pattern matches |
 | `uart_available` / `uart_clear` | Query status, overflow, errors, and send progress; clear unread data |
 | `uart_send_estimate` | Estimate file-send bytes and duration without opening a port |
-| `uart_send_file` / `uart_send_cancel` | Stream a local file in one call; request cancellation |
+| `uart_send_file` / `uart_send_cancel` | Stream a local file in one blocking call; request cancellation of an active transfer |
 
-Every tool except `uart_list_ports` and `uart_send_estimate` requires `port`. The port name (for example, `COM3` or `/dev/ttyUSB0`) is the handle. Ordinary I/O, configuration, expect, and close operations share a global I/O lock; they queue during file sending, while `uart_available` / `uart_clear` remain concurrent.
+Every tool except `uart_list_ports` and `uart_send_estimate` requires `port`. The port name (for example, `COM3` or `/dev/ttyUSB0`) is the handle. Ordinary I/O, configuration, expect, and close operations share a global I/O lock; they queue during file sending, while `uart_available` / `uart_clear` remain concurrent. If the host permits concurrent calls, or a later task can still access the same service, `uart_send_cancel` can request cancellation of an active transfer.
 
 ## AI Usage Guides
 
@@ -84,12 +84,14 @@ Important semantic boundaries:
 
 - `reason="idle"` only means that the byte stream became quiet; it does not mean that a command completed. Use `uart_expect` when a prompt or end marker is available.
 - `uart_exchange` returns pre-existing buffered data, but idle or byte-limit completion is not allowed until at least one new ingress batch is observed after the current write.
-- When terminal input echo is enabled, a pattern contained in the command can make `uart_expect` match early. Disable echo or use an output marker whose complete pattern does not occur contiguously in the command text.
+- `matched=true` only proves that the raw byte pattern occurred in the selected match scope; it does not prove transaction success. Use prompts/output markers for terminals, status codes or transaction IDs for AT/no-echo MCUs, and frame fields plus validation for binary protocols.
+- `uart_expect.match_scope="buffer"` (the default) includes historical unread data. Use `"new"` to wait only for bytes received after the call starts. On terminals with input echo, disable echo or use an output marker whose complete pattern does not occur contiguously in the command text.
 - `uart_expect_send.newline` applies to `reply`. For a terminal reply, use `reply_mode="text"` with `newline="crlf"` instead of embedding the line ending in the reply text.
 - By default, `uart_expect` consumes only through the end of the pattern. Follow it with `uart_read` only when `buffered_bytes > 0` or when output after the pattern is needed.
 - Tools with arguments reject unknown fields instead of silently ignoring them. `buffer_size` can only be set by `uart_open`; close and reopen the port to change it.
 - `overflow_delta > 0` means that ring-buffer data was overwritten, so the current read has a gap.
 - The overflow fields from `uart_send_file` are return-time snapshots. Check the latest `overflow_total` with `uart_available` or `uart_read` afterward; zero is not final proof that no overflow occurred.
+- `uart_send_file` blocks until it finishes by default. Optional `max_duration_ms` is an explicit automatic safeguard that returns `reason="duration_limit"`; normally, wait for the estimate-based transfer duration.
 - `uart_send_file` returning `reason="completed"` only means that the server finished writing. Confirm end-to-end integrity with peer byte counts and a hash of the decoded content.
 
 ## Validation and Development

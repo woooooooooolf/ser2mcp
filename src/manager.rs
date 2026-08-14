@@ -11,8 +11,8 @@
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
 //! - 写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；available/clear/cancel
 //!   不持有该锁，可在文件发送期间查询、清缓冲或请求取消；
-//! - 文件发送每片检查点检测：取消标志（uart_send_cancel / uart_close）、客户端取消令牌、
-//!   端口是否仍打开、读线程致命错误（设备物理断开等，返回 reason="device_error"）。
+//! - 文件发送每片检查点检测：可选时限、取消标志（uart_send_cancel / uart_close）、
+//!   客户端取消令牌、端口是否仍打开、读线程致命错误（设备物理断开等）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -210,6 +210,15 @@ pub struct ExpectOutcome {
     pub buffered: usize,
 }
 
+/// `uart_expect` 系列允许参与匹配的缓冲范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchScope {
+    /// 当前未读缓冲和调用后新到达的数据都参与匹配（兼容现有行为）。
+    Buffer,
+    /// 只允许调用开始后新到达的字节作为 pattern 起点。
+    New,
+}
+
 /// 期待匹配返回原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpectReason {
@@ -255,7 +264,7 @@ pub struct AvailableInfo {
 pub struct SendProgress {
     /// 是否正在发送文件。
     pub active: bool,
-    /// 最近一次发送的结束原因：completed / cancelled / device_error / error；
+    /// 最近一次发送的结束原因：completed / duration_limit / cancelled / device_error / error；
     /// 无发送记录时为 `None`。
     pub last_reason: Option<String>,
     /// 已写入串口的字节数（base64 模式含换行）。
@@ -341,9 +350,9 @@ impl SendState {
 /// `uart_send_file` 的返回统计。
 #[derive(Debug, serde::Serialize)]
 pub struct SendFileOutcome {
-    /// 结束原因：completed（全部输出已写入串口驱动）/ cancelled（被 `uart_send_cancel`、
-    /// `uart_close` 或客户端取消通知中止）/ device_error（读线程致命错误，
-    /// 如串口设备物理断开）。
+    /// 结束原因：completed（全部输出已写入串口驱动）/ duration_limit（显式时限
+    /// 到达）/ cancelled（被 `uart_send_cancel`、`uart_close` 或客户端取消通知
+    /// 中止）/ device_error（读线程致命错误，如串口设备物理断开）。
     pub reason: String,
     /// 原始文件字节数（base64 模式下为编码前字节数）。
     pub raw_bytes: u64,
@@ -621,15 +630,16 @@ impl SerialManager {
     /// `chunks` 为已编码（base64 含换行）的待发送分片迭代器；`total_bytes` 为
     /// 原始文件字节数。每个检查点（每片写入前）检测取消标志（`uart_send_cancel`
     /// / `uart_close` / 客户端取消令牌 `ct`）与端口是否仍打开：
-    /// 被中止时返回 `reason="cancelled"`（非错误），调用方可用 `sent_bytes`
-    /// 与对端对账后决定是否重发。分片读取失败（`Err`）时终止并返回错误，
-    /// 错误信息含已发送进度。
+    /// 被中止时返回 `reason="cancelled"`（非错误）；显式时限到达时返回
+    /// `reason="duration_limit"`。调用方可用 `sent_bytes` 与对端对账后决定是否
+    /// 重发。分片读取失败（`Err`）时终止并返回错误，错误信息含已发送进度。
     pub async fn send_file(
         &self,
         port_name: &str,
         chunks: impl Iterator<Item = Result<Vec<u8>, String>>,
         total_bytes: u64,
         gap_ms: u64,
+        max_duration_ms: Option<u64>,
         ct: Option<&CancellationToken>,
     ) -> Result<SendFileOutcome, String> {
         let _guard = self.io_lock.lock().await;
@@ -654,6 +664,7 @@ impl SerialManager {
         // overflow_total，调用方应再用 uart_available / uart_read 获取最终观察值。
         let overflow_before = buffer.stats().1;
         let started = Instant::now();
+        let max_duration = max_duration_ms.map(Duration::from_millis);
         send.begin(total_bytes);
         let mut sent_bytes = 0u64;
         let mut chunks_done = 0u64;
@@ -690,6 +701,10 @@ impl SerialManager {
                 device_error = Some(e);
                 break;
             }
+            if max_duration.is_some_and(|limit| started.elapsed() >= limit) {
+                reason = "duration_limit";
+                break;
+            }
             match write_locked(&port, &chunk) {
                 Ok(n) => {
                     sent_bytes += n as u64;
@@ -711,11 +726,22 @@ impl SerialManager {
                         reason = "cancelled";
                         break 'send;
                     }
+                    if max_duration.is_some_and(|limit| started.elapsed() >= limit) {
+                        reason = "duration_limit";
+                        break 'send;
+                    }
                     let elapsed = gap_start.elapsed();
                     if elapsed >= gap {
                         break;
                     }
-                    let wait = (gap - elapsed).min(POLL_INTERVAL);
+                    let mut wait = (gap - elapsed).min(POLL_INTERVAL);
+                    if let Some(limit) = max_duration {
+                        wait = wait.min(limit.saturating_sub(started.elapsed()));
+                    }
+                    if wait.is_zero() {
+                        reason = "duration_limit";
+                        break 'send;
+                    }
                     if let Some(ct) = ct {
                         tokio::select! {
                             _ = ct.cancelled() => { reason = "cancelled"; break 'send; }
@@ -764,9 +790,18 @@ impl SerialManager {
         pattern: &[u8],
         timeout_ms: u64,
         consume: bool,
+        match_scope: MatchScope,
     ) -> Result<ExpectOutcome, String> {
-        self.expect_inner(port_name, pattern, timeout_ms, consume, data, None)
-            .await
+        self.expect_inner(
+            port_name,
+            pattern,
+            timeout_ms,
+            consume,
+            match_scope,
+            data,
+            None,
+        )
+        .await
     }
 
     /// 等待串口输出中出现 pattern，命中后在同一临界区内**立即**发送 `reply`
@@ -778,9 +813,18 @@ impl SerialManager {
         reply: &[u8],
         timeout_ms: u64,
         consume: bool,
+        match_scope: MatchScope,
     ) -> Result<ExpectOutcome, String> {
-        self.expect_inner(port_name, pattern, timeout_ms, consume, None, Some(reply))
-            .await
+        self.expect_inner(
+            port_name,
+            pattern,
+            timeout_ms,
+            consume,
+            match_scope,
+            None,
+            Some(reply),
+        )
+        .await
     }
 
     /// 内部实现：可选先发送 `send` → 等待 pattern → 命中后可选发送 `reply`。
@@ -792,6 +836,7 @@ impl SerialManager {
         pattern: &[u8],
         timeout_ms: u64,
         consume: bool,
+        match_scope: MatchScope,
         send: Option<&[u8]>,
         reply: Option<&[u8]>,
     ) -> Result<ExpectOutcome, String> {
@@ -804,6 +849,13 @@ impl SerialManager {
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
 
+        // `new` 的水位必须在可选发送之前建立，避免设备在写调用完成前快速返回的
+        // 字节被排除；搜索从水位重新开始，不允许历史尾部与新数据头部跨界拼接。
+        let min_position = match match_scope {
+            MatchScope::Buffer => None,
+            MatchScope::New => Some(buffer.write_position()),
+        };
+
         let mut written = 0;
         if let Some(send) = send {
             written = write_locked(&port, send)?;
@@ -813,7 +865,10 @@ impl SerialManager {
         let start = Instant::now();
         let (matched, data, overflow_total) = loop {
             // find_and_take 在同一临界区内完成查找与消费（读线程无法插入覆盖）。
-            let (pos, taken, ovf) = buffer.find_and_take(pattern, consume);
+            let (pos, taken, ovf) = match min_position {
+                Some(position) => buffer.find_and_take_from(pattern, consume, Some(position)),
+                None => buffer.find_and_take(pattern, consume),
+            };
             if pos.is_some() {
                 break (true, taken, ovf);
             }

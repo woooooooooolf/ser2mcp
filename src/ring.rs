@@ -65,6 +65,15 @@ impl RingBuf {
         (inner.len, inner.overflow_total, inner.write_revision)
     }
 
+    /// 下一个写入字节的单调位置。
+    ///
+    /// 位置按收到的原始字节数推进，不受消费、清空或覆盖影响。调用方可在一次操作
+    /// 开始时记录水位，随后只允许水位之后开始的 pattern 触发匹配。
+    pub fn write_position(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner.write_position
+    }
+
     /// 在未读区中查找 pattern 首次出现的位置（相对未读区起点的偏移），未命中返回 `None`。
     ///
     /// 用于 `uart_expect` 的内容匹配：跨多次 `push` 分片到达的 pattern
@@ -84,8 +93,23 @@ impl RingBuf {
     ///
     /// 返回 `(命中偏移, 取走的数据, 累计溢出计数)`；未命中时取走的数据为空。
     pub fn find_and_take(&self, pattern: &[u8], consume: bool) -> (Option<usize>, Vec<u8>, u64) {
+        self.find_and_take_from(pattern, consume, None)
+    }
+
+    /// 在未读区中查找 pattern，可选限制 pattern 的起始字节不得早于单调写入位置
+    /// `min_position`。限制只影响匹配候选；`consume=true` 时仍按 FIFO 语义取走
+    /// 未读区起点至 pattern 结尾，因此返回内容可能包含水位之前的历史前缀。
+    pub fn find_and_take_from(
+        &self,
+        pattern: &[u8],
+        consume: bool,
+        min_position: Option<u64>,
+    ) -> (Option<usize>, Vec<u8>, u64) {
         let mut inner = self.inner.lock().unwrap();
-        let pos = find_in(&inner, pattern);
+        let pos = match min_position {
+            Some(position) => find_in_from(&inner, pattern, position),
+            None => find_in(&inner, pattern),
+        };
         let out = match pos {
             Some(p) if consume => take_prefix_inner(&mut inner, p + pattern.len()),
             _ => Vec::new(),
@@ -139,6 +163,8 @@ struct RingBuffer {
     last_write: Instant,
     /// 每次非空写入推进一次的单调版本（自然回绕时 wrapping 比较仍可判断变化）。
     write_revision: u64,
+    /// 下一个写入字节的单调位置；消费、清空和覆盖均不回退。
+    write_position: u64,
 }
 
 impl RingBuffer {
@@ -152,6 +178,7 @@ impl RingBuffer {
             overflow_total: 0,
             last_write: Instant::now(),
             write_revision: 0,
+            write_position: 0,
         }
     }
 
@@ -183,6 +210,9 @@ impl RingBuffer {
         }
         self.last_write = Instant::now();
         self.write_revision = self.write_revision.wrapping_add(1);
+        // u64 足以覆盖任何现实串口寿命；饱和可避免理论上的整数回绕把新数据
+        // 错认成历史数据。
+        self.write_position = self.write_position.saturating_add(n as u64);
     }
 
     /// 在 head 处写入 data（要求 len + data.len() <= capacity）。
@@ -222,10 +252,26 @@ impl RingBuffer {
 /// 在环形缓冲未读区中查找 pattern 首次出现的位置（相对未读区起点的偏移）。
 /// 空 pattern 返回 `Some(0)`；未命中返回 `None`。调用方需已持有锁。
 fn find_in(inner: &RingBuffer, pattern: &[u8]) -> Option<usize> {
+    find_in_from_offset(inner, pattern, 0)
+}
+
+/// 从单调写入位置 `min_position` 开始查找。pattern 的首字节必须位于水位之后，
+/// 因而不会把历史尾部与新数据头部拼接成一次命中。
+fn find_in_from(inner: &RingBuffer, pattern: &[u8], min_position: u64) -> Option<usize> {
+    let buffer_start = inner.write_position.saturating_sub(inner.len as u64);
+    let start_offset = min_position
+        .saturating_sub(buffer_start)
+        .min(inner.len as u64) as usize;
+    find_in_from_offset(inner, pattern, start_offset)
+}
+
+/// 在环形缓冲的逻辑未读区中，从 `start_offset` 开始执行 KMP 查找。
+fn find_in_from_offset(inner: &RingBuffer, pattern: &[u8], start_offset: usize) -> Option<usize> {
+    let start_offset = start_offset.min(inner.len);
     if pattern.is_empty() {
-        return Some(0);
+        return Some(start_offset);
     }
-    if pattern.len() > MAX_PATTERN_SIZE || pattern.len() > inner.len {
+    if pattern.len() > MAX_PATTERN_SIZE || pattern.len() > inner.len.saturating_sub(start_offset) {
         return None;
     }
     let tail = inner.tail();
@@ -257,7 +303,7 @@ fn find_in(inner: &RingBuffer, pattern: &[u8]) -> Option<usize> {
         }
     };
     let mut matched = 0;
-    for pos in 0..inner.len {
+    for pos in start_offset..inner.len {
         let byte = byte_at(pos);
         while matched > 0 && byte != pattern[matched] {
             matched = prefix[matched - 1];
@@ -313,10 +359,13 @@ mod tests {
         let rb = RingBuf::new(8);
         rb.push(b"");
         assert_eq!(rb.stats_with_revision(), (0, 0, 0));
+        assert_eq!(rb.write_position(), 0);
         rb.push(b"x");
         assert_eq!(rb.stats_with_revision(), (1, 0, 1));
+        assert_eq!(rb.write_position(), 1);
         rb.clear();
         assert_eq!(rb.stats_with_revision(), (0, 0, 1));
+        assert_eq!(rb.write_position(), 1);
     }
 
     #[test]
@@ -478,6 +527,45 @@ mod tests {
         rb.push(b"5678"); // 全部覆盖
         assert_eq!(rb.find(b"12"), None);
         assert_eq!(rb.find(b"5678"), Some(0));
+    }
+
+    #[test]
+    fn find_from_position_ignores_history_and_cross_boundary_match() {
+        let rb = RingBuf::new(32);
+        rb.push(b"OLD-MARK|AB");
+        let watermark = rb.write_position();
+
+        // 历史中的完整 pattern 不得命中；边界两侧的 AB + CD 也不得拼接命中。
+        let (pos, data, _) = rb.find_and_take_from(b"OLD-MARK", true, Some(watermark));
+        assert_eq!(pos, None);
+        assert!(data.is_empty());
+        rb.push(b"CD|NEW-MARK");
+        let (pos, data, _) = rb.find_and_take_from(b"ABCD", true, Some(watermark));
+        assert_eq!(pos, None);
+        assert!(data.is_empty());
+
+        // 新数据中的 pattern 可以命中；FIFO 消费仍返回水位之前的历史前缀。
+        let (pos, data, _) = rb.find_and_take_from(b"NEW-MARK", true, Some(watermark));
+        assert_eq!(pos, Some(14));
+        assert_eq!(data, b"OLD-MARK|ABCD|NEW-MARK");
+    }
+
+    #[test]
+    fn find_from_position_survives_overflow_and_clear() {
+        let rb = RingBuf::new(8);
+        rb.push(b"history");
+        let watermark = rb.write_position();
+        rb.push(b"xxTARGET"); // 历史和新数据前缀被覆盖，只保留 xxTARGET。
+        let (pos, _, overflow) = rb.find_and_take_from(b"TARGET", false, Some(watermark));
+        assert_eq!(pos, Some(2));
+        assert_eq!(overflow, 7);
+
+        rb.clear();
+        let watermark = rb.write_position();
+        rb.push(b"TARGET");
+        let (pos, data, _) = rb.find_and_take_from(b"TARGET", true, Some(watermark));
+        assert_eq!(pos, Some(0));
+        assert_eq!(data, b"TARGET");
     }
 
     #[test]

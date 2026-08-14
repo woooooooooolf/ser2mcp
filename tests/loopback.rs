@@ -8,11 +8,13 @@
 //!
 //! 覆盖（单测试函数顺序执行，避免多测试争用同一串口）：
 //! - `uart_expect_send` 为 reply 追加 CRLF，并验证回环字节
+//! - `match_scope=new` 忽略历史 pattern，且新数据仍可命中
 //! - 历史缓冲存在时，`uart_exchange` 仍等到并返回本次新响应
 //! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
 //! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
 //! - 1KiB 小缓冲发送 64KiB → `uart_send_file` 直接报告上行覆盖增量
 //! - `uart_send_cancel` 并发中止传输（reason=cancelled + 部分进度）
+//! - `max_duration_ms` 在显式时限到达后自动停止（reason=duration_limit）
 //! - `uart_close` 并发中断传输并关闭端口
 //! - 原始 JSON-RPC `notifications/cancelled` 通知中止传输（客户端取消路径）
 
@@ -198,6 +200,67 @@ async fn loopback_send_file_all() {
         "expect_send reply 回环字节不一致"
     );
 
+    // ============ 场景 1b：match_scope=new 忽略历史命中，但保留 FIFO 数据语义 ============
+    let scope_marker = "SCOPE-NEW-MARK";
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": port, "data": scope_marker, "mode": "text"}),
+    )
+    .await
+    .expect("预置 match_scope 历史缓冲失败");
+    assert!(!r.is_error.unwrap_or(false));
+    wait_for_buffered(&client, &port, scope_marker.len() as u64).await;
+
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({
+            "port": port,
+            "pattern": scope_marker,
+            "pattern_mode": "text",
+            "reply": "X",
+            "reply_mode": "text",
+            "match_scope": "new",
+            "timeout_ms": 150
+        }),
+    )
+    .await
+    .expect("match_scope=new expect_send 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(
+        v["matched"],
+        json!(false),
+        "历史 marker 不应触发 new: {v:?}"
+    );
+    assert_eq!(v["written"], json!(0), "未命中不得发送 reply: {v:?}");
+    assert_eq!(v["match_scope"], json!("new"));
+
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({
+            "port": port,
+            "data": scope_marker,
+            "mode": "text",
+            "pattern": scope_marker,
+            "pattern_mode": "text",
+            "match_scope": "new",
+            "read_mode": "text",
+            "timeout_ms": 3000
+        }),
+    )
+    .await
+    .expect("match_scope=new expect 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["matched"], json!(true), "调用后新 marker 应命中: {v:?}");
+    assert_eq!(v["match_scope"], json!("new"));
+    assert_eq!(
+        v["data"],
+        json!(format!("{scope_marker}{scope_marker}")),
+        "consume=true 仍应按 FIFO 返回历史前缀和新命中: {v:?}"
+    );
+
     // ============ 场景 2：exchange 不被历史静默缓冲提前收尾 ============
     let old = b"OLD-BUFFER|";
     let new = b"NEW-RESPONSE";
@@ -361,6 +424,45 @@ async fn loopback_send_file_all() {
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["send"]["active"], json!(false));
     assert_eq!(v["send"]["last_reason"], json!("cancelled"));
+
+    // ============ 场景 6b：显式 max_duration_ms 自动止损，默认阻塞语义不变 ============
+    let _ = call(&client, "uart_clear", json!({"port": port}))
+        .await
+        .expect("时限测试前 uart_clear 调用失败");
+    let r = call(
+        &client,
+        "uart_send_file",
+        json!({
+            "port": port,
+            "path": tmp.path,
+            "chunk_size": 256,
+            "gap_ms": 100,
+            "max_duration_ms": 350
+        }),
+    )
+    .await
+    .expect("max_duration_ms send_file 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(
+        v["reason"],
+        json!("duration_limit"),
+        "显式时限应在检查点停止: {v:?}"
+    );
+    assert_eq!(v["max_duration_ms"], json!(350));
+    assert!(
+        v["sent_bytes"].as_u64().unwrap() > 0,
+        "应已有部分进度: {v:?}"
+    );
+    assert!(
+        v["sent_bytes"].as_u64().unwrap() < data.len() as u64,
+        "时限停止不应发完整文件: {v:?}"
+    );
+    let r = call(&client, "uart_available", json!({"port": port}))
+        .await
+        .expect("时限停止后 uart_available 调用失败");
+    let available = r.structured_content.expect("应有结构化返回");
+    assert_eq!(available["send"]["active"], json!(false));
+    assert_eq!(available["send"]["last_reason"], json!("duration_limit"));
 
     // ============ 场景 7：uart_close 并发中断 ============
     let client3 = client.clone();

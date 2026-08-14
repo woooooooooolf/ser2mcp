@@ -49,11 +49,11 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
 - 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
 - 二进制使用 mode/read_mode="hex"；终端命令和 uart_expect_send.reply 使用 text 时都应显式指定 newline，读取优先用 read_mode="text-escaped"。
-- 有提示符或结束标记时用 uart_expect；终端开启回显时，data 中出现的 pattern 会先在命令回显里命中，应关闭回显或构造回显中不连续出现的输出锚点。
+- 有设备协议定义的响应特征时用 uart_expect。matched=true 只证明原始字节流出现 pattern，不代表事务成功；按终端提示符、AT 状态码、事务标识或二进制帧字段选择锚点。
 - 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。uart_exchange 保留并返回历史缓冲，但会先等到本次写入后至少一批新上行数据，才允许 idle/max_bytes 收尾。
 - reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
 - 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
-- pattern 是大小写敏感的原始字节子串，不支持正则；历史未读数据会立即参与匹配。
+- pattern 是大小写敏感的原始字节子串，不支持正则。match_scope="buffer"（默认）允许历史未读数据参与；只等待调用后的新数据时用 "new"。
 - buffer_size 只能在 uart_open 时设置；需要调整时先 uart_close 再重新打开。所有带参数的工具都拒绝未知字段。
 
 文件发送：
@@ -61,7 +61,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 - 按 uart_send_estimate → 准备对端 → uart_send_file 一次调用 → EOF/按长度结束 → 对端长度和哈希对账执行；不要循环 uart_write。
 - reason 只表示服务器端结束状态；completed 不代表对端完整接收。base64 的 sent_bytes 包含编码和换行，不能与 raw_bytes 直接比较。
 - send_file 的 overflow 字段是生成返回时的上行缓冲快照，0 不等于最终无溢出；返回后再调用 uart_available / uart_read 确认最新 overflow_total。
-- ser2mcp 不主动发送 EOF。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
+- ser2mcp 不主动发送 EOF。uart_send_file 默认同步阻塞至结束；可显式设置 max_duration_ms 自动止损。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；宿主支持并发或后续请求仍可访问同一服务时，uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
 
 详细决策与故障处理见 ser2mcp-usage SKILL；文件/固件传输见 ser2mcp-file-transfer SKILL。"##;
 
@@ -199,7 +199,7 @@ pub struct ExpectArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
     /// 要等待出现的非空原始字节子串（hex 或 text，取决于 pattern_mode），
-    /// 编码后上限 65536 字节；历史未读数据和终端输入回显都会参与匹配。
+    /// 编码后上限 65536 字节；具体匹配范围由 match_scope 决定。
     pub pattern: String,
     /// pattern 编码：hex（默认）或 text。
     pub pattern_mode: Option<String>,
@@ -208,8 +208,11 @@ pub struct ExpectArgs {
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true；
     /// false 时纯等待（数据留在缓冲，后续可用 uart_read 取走）。
     pub consume: Option<bool>,
+    /// 匹配范围：buffer（默认，历史未读数据与新数据都参与）/ new（仅允许调用开始后
+    /// 到达的字节作为 pattern 起点；返回数据仍可能包含水位之前的历史前缀）。
+    pub match_scope: Option<String>,
     /// 可选：等待前先发送的数据（"发送+等待"一步完成），编码取决于 mode。
-    /// 终端开启输入回显时，不要让该数据连续包含 pattern，否则可能提前命中回显。
+    /// 对开启输入回显的终端，若该数据连续包含 pattern，回显可能先于实际输出命中。
     pub data: Option<String>,
     /// data 的编码：hex（默认）或 text。
     pub mode: Option<String>,
@@ -239,6 +242,8 @@ pub struct ExpectSendArgs {
     pub timeout_ms: Option<u64>,
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true。
     pub consume: Option<bool>,
+    /// 匹配范围：buffer（默认）/ new（仅允许调用开始后到达的字节作为 pattern 起点）。
+    pub match_scope: Option<String>,
     /// 返回 data 字段的编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped。
     pub read_mode: Option<String>,
 }
@@ -259,6 +264,9 @@ pub struct SendFileArgs {
     pub chunk_size: Option<usize>,
     /// 片间间隔（毫秒），默认 0，上限 60000（每片写完 flush 已天然限速到波特率上限）。
     pub gap_ms: Option<u64>,
+    /// 可选自动止损时限（毫秒，必须 >= 1）。默认不限制并保持阻塞等待；达到时限后
+    /// 在下一个分片或间隔检查点停止并返回 reason="duration_limit"。
+    pub max_duration_ms: Option<u64>,
 }
 
 /// 串口工具参数：uart_send_estimate（发送耗时估算，无需打开串口）。
@@ -382,6 +390,22 @@ fn parse_newline(s: &str) -> Result<(), String> {
     }
 }
 
+/// 校验 expect 匹配范围：buffer（兼容默认）/ new（仅调用后新数据）。
+fn parse_match_scope(s: &str) -> Result<manager::MatchScope, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "buffer" => Ok(manager::MatchScope::Buffer),
+        "new" => Ok(manager::MatchScope::New),
+        other => Err(format!("match_scope 仅支持 buffer 或 new，收到 {other:?}")),
+    }
+}
+
+fn match_scope_str(scope: manager::MatchScope) -> &'static str {
+    match scope {
+        manager::MatchScope::Buffer => "buffer",
+        manager::MatchScope::New => "new",
+    }
+}
+
 /// 按 newline 参数在发送数据末尾追加行尾字节（none 时原样）。
 fn apply_newline(mut data: Vec<u8>, newline: &str) -> Vec<u8> {
     match newline {
@@ -436,6 +460,7 @@ fn expect_result(
     pattern: &str,
     read_mode: &str,
     newline: &str,
+    match_scope: manager::MatchScope,
 ) -> CallToolResult {
     let (data, used_mode) = encode_recv(&outcome.data, read_mode);
     CallToolResult::structured(json!({
@@ -445,6 +470,7 @@ fn expect_result(
         "bytes": outcome.data.len(),
         "mode": used_mode,
         "newline": newline,
+        "match_scope": match_scope_str(match_scope),
         "written": outcome.written,
         "reason": match outcome.reason {
             manager::ExpectReason::Matched => "matched",
@@ -687,10 +713,12 @@ impl Ser2Mcp {
     /// 把本地文件分片限速发送到串口：服务器内部循环一次调用，替代模型逐块
     /// 调 uart_write（省协议与 token 成本）。只承诺"把文件字节发出去"：不解析
     /// 数据格式、不主动发 EOF（对端需要 EOF 时模型另用 uart_write 补 \x04）。
-    /// 发送期间 `uart_available` 可查进度，`uart_send_cancel` / `uart_close`
-    /// / 客户端取消通知（notifications/cancelled）均可中止。
+    /// 默认同步阻塞至发送结束；`max_duration_ms` 仅在显式设置时自动止损。宿主能
+    /// 并发调用或后续请求仍能访问同一服务时，`uart_available` 可查进度，
+    /// `uart_send_cancel` / `uart_close` 可请求中止；客户端实际发送的取消通知
+    ///（notifications/cancelled）也可中止。
     #[tool(
-        description = "文件流式发送（port、path 必填）：读取 ser2mcp 进程有权访问的本地普通文件并分片发送到串口；服务端不限制目录，调用前须确认路径与目标设备均在用户授权范围内。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB；gap_ms 默认 0、上限 60000。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。overflow 是生成返回时的上行缓冲快照，返回后须用 uart_available / uart_read 再确认最新 overflow_total。发送期间可 uart_available 查进度、uart_send_cancel 或 uart_close 中止。"
+        description = "同步阻塞地流式发送文件（port、path 必填）：读取 ser2mcp 进程有权访问的本地普通文件并分片发送到串口；服务端不限制目录，调用前须确认路径与目标设备均在用户授权范围内。mode=text（默认，原样按字节发）/ base64（跨分片连续编码，padding 仅在文件末尾，每 76 字符自动换行、末尾补换行）；chunk_size 默认 256、上限 1 MiB；gap_ms 默认 0、上限 60000；max_duration_ms 默认不限制，显式设置且达到时在检查点以 reason=duration_limit 停止。只发字节、不解析、不主动发 EOF。返回 reason/raw_bytes/sent_bytes/chunks/elapsed_ms/overflow/device_error 统计；reason 只表示服务器端结束状态，端到端完整性须用对端字节数与解码后哈希确认。overflow 是生成返回时的上行缓冲快照，返回后须用 uart_available / uart_read 再确认最新 overflow_total。宿主允许并发或后续请求仍能访问同一服务时，可用 uart_available 查进度、uart_send_cancel 或 uart_close 请求中止。"
     )]
     async fn uart_send_file(
         &self,
@@ -720,6 +748,15 @@ impl Ser2Mcp {
                 None,
             ));
         }
+        let max_duration_ms = match args.max_duration_ms {
+            Some(0) => {
+                return Err(McpError::invalid_params(
+                    "max_duration_ms 必须 >= 1；不需要时限时请省略该参数",
+                    None,
+                ));
+            }
+            value => value,
+        };
         let total = match send_file_meta(&args.path) {
             Ok(s) => s,
             Err(e) => return Err(McpError::invalid_params(e, None)),
@@ -731,7 +768,14 @@ impl Ser2Mcp {
         let chunks = sendfile::ChunkIter::new(file, mode, chunk_size);
         match self
             .manager
-            .send_file(&args.port, chunks, total, gap_ms, Some(&ct))
+            .send_file(
+                &args.port,
+                chunks,
+                total,
+                gap_ms,
+                max_duration_ms,
+                Some(&ct),
+            )
             .await
         {
             Ok(outcome) => Ok(CallToolResult::structured(json!({
@@ -746,15 +790,17 @@ impl Ser2Mcp {
                 "mode": mode.as_str(),
                 "chunk_size": chunk_size,
                 "gap_ms": gap_ms,
+                "max_duration_ms": max_duration_ms,
             }))),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
 
-    /// 中止当前 uart_send_file 传输（无传输时为 no-op）。发送循环在下一个
-    /// 检查点退出，最坏多写一片；返回调用前的发送状态快照供判断。
+    /// 请求中止当前 uart_send_file 传输（无传输时为 no-op）。适用于宿主允许并发，
+    /// 或前一次会话/任务已停止等待但服务端传输仍在继续的情况。发送循环在下一个
+    /// 检查点退出，通常最多再完成当前一片；返回调用前的发送状态快照供判断。
     #[tool(
-        description = "中止当前 uart_send_file 文件发送（port 必填；无传输时为 no-op）。返回调用前的发送状态快照。"
+        description = "请求中止当前 uart_send_file 文件发送（port 必填；无传输时为 no-op）。适用于宿主允许并发，或后续会话仍能访问正在发送的同一 ser2mcp 服务；返回调用前的发送状态快照。"
     )]
     async fn uart_send_cancel(
         &self,
@@ -871,12 +917,13 @@ impl Ser2Mcp {
 
     /// 等待串口输出中出现指定 pattern（内容匹配，替代 AI 侧 sleep+盲发 的时序编排）。
     /// 可选 `data` 实现"发送+等待"一步完成；命中（或超时）后返回。
-    /// 若终端开启输入回显且 `data` 本身含 pattern，命令回显可先于真实输出命中；
-    /// 调用方应关闭回显，或构造在回显中不连续出现、只在实际输出中出现的锚点。
+    /// `matched=true` 只表示匹配范围内出现原始字节 pattern，不解释设备协议语义。
+    /// 默认 `match_scope=buffer`；`new` 只允许调用后新字节触发匹配。对开启输入回显
+    /// 的终端，命令回显可能提前命中，应关闭回显或使用输入中不连续出现的输出锚点。
     /// `consume=true`（默认）时取走并返回"截至 pattern 结尾"的内容，pattern 之后
     /// 的字节留在缓冲；`consume=false` 时纯等待、数据不消费（可用 uart_read 取走诊断）。
     #[tool(
-        description = "等待串口输出中出现指定 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。命中或超时后返回，consume=true（默认）时返回截至 pattern 结尾的内容。pattern 是原始字节匹配；若终端开启输入回显且 data 含 pattern，命令回显会造成提前命中，应关闭回显或使用在回显中不连续出现的输出锚点。"
+        description = "等待串口输出中出现指定原始字节 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。matched 只证明字节命中，不代表设备事务成功。match_scope=buffer（默认）匹配历史未读与新数据；new 只允许调用后到达的字节作为 pattern 起点，但 consume 返回仍可能含历史前缀。consume=true（默认）时返回截至 pattern 结尾的内容。回显终端应避免让输入连续包含只应由实际输出产生的锚点；AT、无回显 MCU 和二进制协议应使用各自的状态码、事务标识或帧字段。"
     )]
     async fn uart_expect(
         &self,
@@ -906,6 +953,10 @@ impl Ser2Mcp {
             ));
         }
         let consume = args.consume.unwrap_or(true);
+        let match_scope = match parse_match_scope(args.match_scope.as_deref().unwrap_or("buffer")) {
+            Ok(scope) => scope,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
@@ -932,10 +983,23 @@ impl Ser2Mcp {
         };
         match self
             .manager
-            .expect(&args.port, send.as_deref(), &pattern, timeout_ms, consume)
+            .expect(
+                &args.port,
+                send.as_deref(),
+                &pattern,
+                timeout_ms,
+                consume,
+                match_scope,
+            )
             .await
         {
-            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, &newline)),
+            Ok(outcome) => Ok(expect_result(
+                outcome,
+                &args.pattern,
+                &read_mode,
+                &newline,
+                match_scope,
+            )),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }
@@ -943,9 +1007,10 @@ impl Ser2Mcp {
     /// 等待串口输出中出现指定 pattern，命中后在同一临界区内**立即**发送 `reply`
     /// （等待→命中→发送一步原子完成，消除"expect 返回 → 再调 write"的往返延迟，
     /// 适合 bootdelay 抢窗口等时序敏感场景）。`newline` 作用于 reply；
-    /// 超时未命中时不发送 reply。
+    /// 超时未命中时不发送 reply。等待未来事件时可用 `match_scope=new`，避免历史
+    /// pattern 触发旧事件对应的 reply。
     #[tool(
-        description = "等待串口输出中出现指定 pattern 后立即发送 reply（port、pattern、reply 必填；newline 可给 reply 追加行尾；超时未命中不发送）。返回 matched、written、data 及溢出统计。"
+        description = "等待串口输出中出现指定原始字节 pattern 后立即发送 reply（port、pattern、reply 必填；newline 可给 reply 追加行尾；超时未命中不发送）。match_scope=buffer（默认）允许历史未读数据命中；等待未来事件时用 new，避免旧 pattern 触发 reply。matched 只证明字节命中，不代表设备事务成功。返回 matched、written、data 及溢出统计。"
     )]
     async fn uart_expect_send(
         &self,
@@ -994,16 +1059,33 @@ impl Ser2Mcp {
             ));
         }
         let consume = args.consume.unwrap_or(true);
+        let match_scope = match parse_match_scope(args.match_scope.as_deref().unwrap_or("buffer")) {
+            Ok(scope) => scope,
+            Err(e) => return Err(McpError::invalid_params(e, None)),
+        };
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
         }
         match self
             .manager
-            .expect_send(&args.port, &pattern, &reply, timeout_ms, consume)
+            .expect_send(
+                &args.port,
+                &pattern,
+                &reply,
+                timeout_ms,
+                consume,
+                match_scope,
+            )
             .await
         {
-            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, &newline)),
+            Ok(outcome) => Ok(expect_result(
+                outcome,
+                &args.pattern,
+                &read_mode,
+                &newline,
+                match_scope,
+            )),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }

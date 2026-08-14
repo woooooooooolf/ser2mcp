@@ -9,8 +9,8 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 
 - 按 `uart_list_ports → uart_open → 交互 → uart_close` 操作；重复打开同一端口前先关闭。
 - 除 `uart_list_ports` 和 `uart_send_estimate` 外，调用时都传 `port`。
-- 一次只发送一条命令，并用设备输出锚点判断完成；不要用 sleep 盲等。
-- 终端开启输入回显时，`data` 中的 pattern 会先在命令回显里命中。先 `stty -echo`，或让命令以分段字面量生成锚点，使完整 pattern 不连续出现在回显中。
+- 一次只发送一条命令，并用设备协议定义的响应特征判断完成；不要用 sleep 盲等。
+- 把 `matched=true` 解释为“匹配范围内出现原始字节 pattern”，不要直接解释为当前事务成功。
 - 终端命令和 `uart_expect_send.reply` 显式带行尾。通常用 `newline="crlf"`；已知设备只需 LF 时用 `lf`。
 - 把 `reason="idle"` 解释为“字节流暂时静默”，不要解释为命令已完成。
 - 检查每次读取结果的 `overflow_delta`；大于 0 表示数据已被覆盖，当前结果有缺口。
@@ -35,9 +35,11 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 
 1. 调用 `uart_list_ports`，从返回结果中确定端口名。
 2. 调用 `uart_open {port, baudrate, ...}`。端口名就是后续调用的句柄。
-3. 根据设备能力选择完成判据：
-   - 有提示符或确定结束标记：用 `uart_expect`。
-   - 无稳定锚点、响应很短：用 `uart_exchange` 的 idle 收尾。
+3. 根据设备协议选择完成判据：
+   - 交互式终端：提示符、命令特有结束标记或实际输出特征。
+   - AT / 无回显命令设备：`OK` / `ERROR`、响应 opcode、事务 ID 或设备状态。
+   - 二进制帧协议：帧类型、地址、序列号、长度与校验；“命令回显”概念不适用。
+   - 没有稳定响应特征且响应很短：才用 `uart_exchange` 的 idle 收尾。
    - 需要命中即响应：用 `uart_expect_send`。
 4. 选择编码并发送：
    - 二进制协议：发送 `mode="hex"`，读取 `read_mode="hex"`。
@@ -50,6 +52,7 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 
 ```text
 uart_expect {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}
+uart_expect {port: "COM3", pattern: "READY", pattern_mode: "text", match_scope: "new", read_mode: "text-escaped"}
 uart_exchange {port: "COM3", data: "AT\r\n", mode: "text", read_mode: "text-escaped"}
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex", read_mode: "hex"}
 uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", reply: "y", reply_mode: "text", newline: "crlf", read_mode: "text-escaped"}
@@ -62,15 +65,16 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
   - `max_bytes`：未读数据达到 `max_bytes`；继续读取剩余数据。
   - `timeout`：总等待达到 `timeout_ms`；结合实际返回内容判断是否已有部分响应。
 - `uart_exchange` 会保留并返回调用前的历史缓冲，但历史数据不会单独触发 idle/max_bytes；收尾前至少等到一批本次写入后的新上行数据。
-- `uart_expect` 的 `matched=true` 才表示找到指定锚点。pattern 是大小写敏感的原始字节子串，不支持正则。
-- `matched=true` 只证明串口字节流出现了 pattern，不证明它来自命令的实际输出。若返回内容包含所发送的命令行，视为回显假阳性，继续等待真实锚点或修正终端/锚点后重试。
+- `uart_expect` 的 pattern 是大小写敏感的原始字节子串，不支持正则。`matched=true` 只证明该字节序列出现，不证明它来自当前事务或具有设备协议上的成功含义。
+- `match_scope="buffer"`（默认）同时匹配历史未读与调用后新数据；只等待未来响应或事件时用 `"new"`。`new` 只限制 pattern 起点，`consume=true` 的返回仍可能包含水位之前的历史前缀。
 - `consume=true`（默认）只消费到 pattern 结尾；pattern 之后的数据保留在缓冲，会进入后续读取。
 - `uart_expect` 返回后，仅当 `buffered_bytes > 0` 或确实需要 pattern 后的尾部输出时，再补一次 `uart_read`；不要把 follow-up read 当成固定步骤。
-- 调用 `uart_expect` 时，缓冲中已有的历史数据立即参与匹配。需要只匹配新输出时，先读取或清理残留。
+- 不要固定在 expect 前调用 `uart_clear`：历史数据无价值且允许丢弃时可清理；需要保留启动日志、异步事件或遥测时使用 `match_scope="new"`。
 - `overflow_delta > 0` 表示本次观察区间内有字节被覆盖；调大 `buffer_size` 或更频繁地读取，并重新获取关键数据。
 
 ## 处理终端状态
 
+- 仅对开启输入回显的终端：若发送文本连续包含 pattern，回显可能先于实际输出命中。关闭回显，或使用完整 pattern 不连续出现在输入中的实际输出锚点。返回中包含命令行本身既不能证明假阳性，也不能证明事务成功。
 - 命令停在行缓冲：补正确行尾；不要连续发送第二条命令，否则可能与残留拼接。
 - 长命令中途静默：等待提示符或命令特有结束标记，并把 `timeout_ms` 设到足以覆盖整个操作；不要依赖 `uart_exchange` 的 idle。
 - 提示符不可用：改用命令特有输出，如 `OK`、长度行或显式打印的结束标记。
@@ -85,4 +89,4 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - 所有带参数的工具都拒绝未知字段；拼写错误或把 `buffer_size` 传给 `uart_configure` 会返回参数错误
 - read/exchange/expect `timeout_ms`：最大 `300000`
 - expect pattern：编码后最大 `64 KiB`
-- 普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间会排队。`uart_available` / `uart_clear` 可并发，`uart_send_cancel` 可请求取消。
+- 普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间会排队。`uart_available` / `uart_clear` 不持有该锁；宿主允许并发或后续任务仍能访问同一服务时，`uart_send_cancel` 可请求取消。

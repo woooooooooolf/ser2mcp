@@ -24,8 +24,10 @@
 //!   （[`hex::encode`] / [`hex::decode`]），`mode="text"` 切换 UTF-8 文本，
 //!   `read_mode="text-escaped"`（[`hex::encode_escaped`]）文本为主、
 //!   非文本字节 `\xNN` 转义（终端/日志场景不降级）；
-//! - **文件流式发送**：`uart_send_file` 由服务器内部循环分片限速（[`sendfile`]），
-//!   替代模型逐块 `uart_write`；每片检查点感知取消与设备异常（读线程致命错误）。
+//! - **可限定匹配边界**：`uart_expect` 系列可匹配全部未读缓冲，或用调用时的
+//!   单调字节水位只允许新数据触发 pattern，同时保留 FIFO 消费语义；
+//! - **文件流式发送**：`uart_send_file` 由服务器内部同步循环分片限速（[`sendfile`]），
+//!   替代模型逐块 `uart_write`；每片检查点感知可选时限、取消与设备异常。
 //!
 //! ## 模块
 //!
