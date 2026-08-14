@@ -54,6 +54,14 @@ Windows 路径示例：`"command": "C:\\tools\\ser2mcp.exe"`。日志写入 stde
 
 安装后调用 `uart_list_ports` 验证；返回空数组也表示服务器已正常工作，只是当前没有可枚举串口。离线安装时下载完整源码仓库，并把仓库目录作为 `install_source` 的本地路径。
 
+### DeepSeek-Harness 接入
+
+在 DSH 中对 Agent 说：
+
+> 请从 [https://github.com/woooooooooolf/ser2mcp](https://github.com/woooooooooolf/ser2mcp) 安装 ser2mcp 到 DSH，并按照 [docs/DSH_INTEGRATION.md](docs/DSH_INTEGRATION.md) 完成部署。
+
+Agent 应以当前 DSH 版本的配置和目录约定为准，完成 stdio MCP 服务器注册，并安装仓库内的两个 SKILL。
+
 ## 工具
 
 | 工具 | 用途 |

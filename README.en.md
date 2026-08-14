@@ -54,6 +54,14 @@ The repository root contains `reasonix-plugin.json`; `bin/` contains prebuilt fi
 
 Verify the installation with `uart_list_ports`. An empty array still means the server is working; no serial ports are currently enumerable. For offline installation, download the complete source repository and pass the repository directory to `install_source` as a local path.
 
+### DeepSeek-Harness Integration
+
+Tell the Agent in DSH:
+
+> Install ser2mcp into DSH from [https://github.com/woooooooooolf/ser2mcp](https://github.com/woooooooooolf/ser2mcp), following [docs/DSH_INTEGRATION.md](docs/DSH_INTEGRATION.md) to complete the deployment.
+
+The Agent should follow the configuration and directory conventions of the installed DSH version, register the stdio MCP server, and install both SKILLs from this repository.
+
 ## Tools
 
 | Tool | Purpose |
