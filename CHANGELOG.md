@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 将 Release 工作流实际为 ARM64 的 macOS 产物从 `macos-x64` 更名为 `macos-arm64`，并在构建前校验 Runner 架构，避免平台名称与二进制架构不一致
+
 ## [0.8.5] - 2026-08-14
 
 ### Fixed

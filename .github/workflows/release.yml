@@ -20,13 +20,24 @@ jobs:
         include:
           - os: windows-latest
             artifact: ser2mcp-windows-x64
+            runner_arch: X64
           - os: ubuntu-latest
             artifact: ser2mcp-linux-x64
+            runner_arch: X64
           - os: macos-latest
-            artifact: ser2mcp-macos-x64
+            artifact: ser2mcp-macos-arm64
+            runner_arch: ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: 验证 Runner 架构
+        shell: bash
+        run: |
+          if [ "$RUNNER_ARCH" != "${{ matrix.runner_arch }}" ]; then
+            echo "::error::Runner 架构为 $RUNNER_ARCH，产物名称要求 ${{ matrix.runner_arch }}"
+            exit 1
+          fi
 
       - name: Rust 工具链
         run: rustup toolchain install stable --profile minimal
