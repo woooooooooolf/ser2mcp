@@ -7,6 +7,9 @@
 ### Fixed
 
 - 将 Reasonix 插件入口从无法被 Unix `exec` 直接启动的 polyglot `.cmd` 改为无扩展名入口：Windows 解析同名 `.exe`，Linux/macOS 通过标准 POSIX shebang 启动对应二进制
+- 修复 `uart_expect_send` 的 `newline` 未作用于 `reply`，导致终端回复与后续输入拼成同一行的问题
+- 修复 `uart_exchange` 可被调用前已静默的历史缓冲立即触发 idle/max_bytes，导致本次响应滞留到下一次读取的问题
+- 所有工具参数对象改为拒绝未知字段，不再静默忽略拼写错误或不受支持的 `uart_configure.buffer_size`；缓冲大小仍仅能在 `uart_open` 时设置
 
 ## [0.8.4] - 2026-08-12
 

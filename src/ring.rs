@@ -56,6 +56,15 @@ impl RingBuf {
         (inner.len, inner.overflow_total)
     }
 
+    /// 当前未读字节数、累计溢出字节数和单调写入版本。
+    ///
+    /// 每次非空 [`Self::push`] 都会推进版本；消费者可据此区分调用前已有的历史
+    /// 缓冲与调用后新到达的上行数据，而无需丢弃历史内容。
+    pub fn stats_with_revision(&self) -> (usize, u64, u64) {
+        let inner = self.inner.lock().unwrap();
+        (inner.len, inner.overflow_total, inner.write_revision)
+    }
+
     /// 在未读区中查找 pattern 首次出现的位置（相对未读区起点的偏移），未命中返回 `None`。
     ///
     /// 用于 `uart_expect` 的内容匹配：跨多次 `push` 分片到达的 pattern
@@ -128,6 +137,8 @@ struct RingBuffer {
     overflow_total: u64,
     /// 最近一次写入时间（用于空闲判定）。
     last_write: Instant,
+    /// 每次非空写入推进一次的单调版本（自然回绕时 wrapping 比较仍可判断变化）。
+    write_revision: u64,
 }
 
 impl RingBuffer {
@@ -140,6 +151,7 @@ impl RingBuffer {
             capacity,
             overflow_total: 0,
             last_write: Instant::now(),
+            write_revision: 0,
         }
     }
 
@@ -170,6 +182,7 @@ impl RingBuffer {
             self.write_at_head(data);
         }
         self.last_write = Instant::now();
+        self.write_revision = self.write_revision.wrapping_add(1);
     }
 
     /// 在 head 处写入 data（要求 len + data.len() <= capacity）。
@@ -280,14 +293,30 @@ mod tests {
     #[test]
     fn basic_push_take() {
         let rb = RingBuf::new(8);
+        assert_eq!(rb.stats_with_revision(), (0, 0, 0));
         rb.push(b"AB");
+        assert_eq!(rb.stats_with_revision(), (2, 0, 1));
         rb.push(b"CD");
+        assert_eq!(rb.stats_with_revision(), (4, 0, 2));
         let (data, overflow) = rb.take_all();
         assert_eq!(data, b"ABCD");
         assert_eq!(overflow, 0);
         // 取走后为空
         let (data2, _) = rb.take_all();
         assert!(data2.is_empty());
+        // 消费不推进写入版本，便于 exchange 区分历史数据和新上行数据。
+        assert_eq!(rb.stats_with_revision(), (0, 0, 2));
+    }
+
+    #[test]
+    fn empty_push_does_not_advance_revision() {
+        let rb = RingBuf::new(8);
+        rb.push(b"");
+        assert_eq!(rb.stats_with_revision(), (0, 0, 0));
+        rb.push(b"x");
+        assert_eq!(rb.stats_with_revision(), (1, 0, 1));
+        rb.clear();
+        assert_eq!(rb.stats_with_revision(), (0, 0, 1));
     }
 
     #[test]

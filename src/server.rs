@@ -48,12 +48,13 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 
 核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
 - 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
-- 二进制使用 mode/read_mode="hex"；终端命令使用 mode="text"、显式 newline，并优先用 read_mode="text-escaped"。
+- 二进制使用 mode/read_mode="hex"；终端命令和 uart_expect_send.reply 使用 text 时都应显式指定 newline，读取优先用 read_mode="text-escaped"。
 - 有提示符或结束标记时用 uart_expect；终端开启回显时，data 中出现的 pattern 会先在命令回显里命中，应关闭回显或构造回显中不连续出现的输出锚点。
-- 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。
+- 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。uart_exchange 保留并返回历史缓冲，但会先等到本次写入后至少一批新上行数据，才允许 idle/max_bytes 收尾。
 - reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
 - 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
 - pattern 是大小写敏感的原始字节子串，不支持正则；历史未读数据会立即参与匹配。
+- buffer_size 只能在 uart_open 时设置；需要调整时先 uart_close 再重新打开。所有带参数的工具都拒绝未知字段。
 
 文件发送：
 - 先确认本地 path 与目标设备均在用户授权范围内；服务端可读取进程有权访问的任意普通文件，不限制目录。
@@ -66,6 +67,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 
 /// 串口工具参数：uart_open。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OpenArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -92,6 +94,7 @@ pub struct OpenArgs {
 
 /// 串口工具参数：uart_configure（全部可选，仅更新传入项）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigureArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -111,6 +114,7 @@ pub struct ConfigureArgs {
 
 /// 串口工具参数：uart_write。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -125,6 +129,7 @@ pub struct WriteArgs {
 
 /// 串口工具参数：uart_read。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReadArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -142,6 +147,7 @@ pub struct ReadArgs {
 
 /// 串口工具参数：uart_exchange。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -164,6 +170,7 @@ pub struct ExchangeArgs {
 
 /// 串口工具参数：uart_available。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AvailableArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -171,6 +178,7 @@ pub struct AvailableArgs {
 
 /// 串口工具参数：uart_clear。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClearArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -178,6 +186,7 @@ pub struct ClearArgs {
 
 /// 串口工具参数：uart_close。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CloseArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -185,6 +194,7 @@ pub struct CloseArgs {
 
 /// 串口工具参数：uart_expect（等待匹配输出，可选"发送+等待"）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExpectArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -211,6 +221,7 @@ pub struct ExpectArgs {
 
 /// 串口工具参数：uart_expect_send（匹配后立即发送）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExpectSendArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -222,6 +233,8 @@ pub struct ExpectSendArgs {
     pub pattern_mode: Option<String>,
     /// reply 编码：hex（默认）或 text。
     pub reply_mode: Option<String>,
+    /// reply 发送后追加的行尾：none（默认）/ lf / crlf。
+    pub newline: Option<String>,
     /// 总等待超时（毫秒），默认 5000，上限 300000（5 分钟）。
     pub timeout_ms: Option<u64>,
     /// 命中后是否取走并返回"截至 pattern 结尾"的内容，默认 true。
@@ -232,6 +245,7 @@ pub struct ExpectSendArgs {
 
 /// 串口工具参数：uart_send_file（文件流式发送）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SendFileArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -249,6 +263,7 @@ pub struct SendFileArgs {
 
 /// 串口工具参数：uart_send_estimate（发送耗时估算，无需打开串口）。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SendEstimateArgs {
     /// 本地文件路径（只读元数据，不发送）。
     pub path: String,
@@ -264,6 +279,7 @@ pub struct SendEstimateArgs {
 
 /// 串口工具参数：uart_send_cancel。
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SendCancelArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
@@ -796,10 +812,11 @@ impl Ser2Mcp {
     }
 
     /// 一步完成"发送 + 读取"：先写数据，再按 uart_read 的语义拉取回复；写入与读取
-    /// 持有同一全局 I/O 临界区，不会被其它工具调用插入。
+    /// 持有同一全局 I/O 临界区，不会被其它工具调用插入。调用前的历史缓冲
+    /// 仍会返回，但只有观察到本次写入后的新上行数据，才允许 idle/max_bytes 收尾。
     /// 适合短命令/无锚点场景（如 AT 查询）；长命令（存在中间静默期）改用 uart_expect。
     #[tool(
-        description = "发送数据并等待回复（port 必填；写入与读取在同一 I/O 临界区完成，不会被其它工具调用插入）。适合短命令、idle 收尾；返回 written、data、reason 及溢出统计。"
+        description = "发送数据并等待回复（port 必填；写入与读取在同一 I/O 临界区完成）。历史缓冲仍会返回，但不能单独触发 idle/max_bytes；收尾前至少等到一批写入后的新上行数据。适合短命令；返回 written、data、reason 及溢出统计。"
     )]
     async fn uart_exchange(
         &self,
@@ -925,9 +942,10 @@ impl Ser2Mcp {
 
     /// 等待串口输出中出现指定 pattern，命中后在同一临界区内**立即**发送 `reply`
     /// （等待→命中→发送一步原子完成，消除"expect 返回 → 再调 write"的往返延迟，
-    /// 适合 bootdelay 抢窗口等时序敏感场景）。超时未命中时不发送 reply。
+    /// 适合 bootdelay 抢窗口等时序敏感场景）。`newline` 作用于 reply；
+    /// 超时未命中时不发送 reply。
     #[tool(
-        description = "等待串口输出中出现指定 pattern 后立即发送 reply（port、pattern、reply 必填；超时未命中不发送）。返回 matched、written、data 及溢出统计。"
+        description = "等待串口输出中出现指定 pattern 后立即发送 reply（port、pattern、reply 必填；newline 可给 reply 追加行尾；超时未命中不发送）。返回 matched、written、data 及溢出统计。"
     )]
     async fn uart_expect_send(
         &self,
@@ -950,6 +968,13 @@ impl Ser2Mcp {
         if let Err(e) = parse_send_mode(&reply_mode) {
             return Err(McpError::invalid_params(e, None));
         }
+        let newline = args
+            .newline
+            .unwrap_or_else(|| "none".into())
+            .to_ascii_lowercase();
+        if let Err(e) = parse_newline(&newline) {
+            return Err(McpError::invalid_params(e, None));
+        }
         let reply = match encode_send(&args.reply, &reply_mode) {
             Ok(r) => r,
             Err(e) => return Err(McpError::invalid_params(e, None)),
@@ -957,6 +982,7 @@ impl Ser2Mcp {
         if reply.is_empty() {
             return Err(McpError::invalid_params("reply 不能为空", None));
         }
+        let reply = apply_newline(reply, &newline);
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         if timeout_ms > manager::MAX_EXPECT_TIMEOUT_MS {
             return Err(McpError::invalid_params(
@@ -977,7 +1003,7 @@ impl Ser2Mcp {
             .expect_send(&args.port, &pattern, &reply, timeout_ms, consume)
             .await
         {
-            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, "none")),
+            Ok(outcome) => Ok(expect_result(outcome, &args.pattern, &read_mode, &newline)),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
     }

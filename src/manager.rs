@@ -179,6 +179,16 @@ pub enum ReadReason {
     Timeout,
 }
 
+/// 单次 read/exchange 的收尾条件。
+#[derive(Debug, Clone, Copy)]
+struct ReadLimits {
+    idle_ms: u64,
+    max_bytes: usize,
+    timeout_ms: u64,
+    /// exchange 需要观察到调用后新的上行写入；普通 read 不设门槛。
+    require_revision_after: Option<u64>,
+}
+
 /// 期待匹配结果（`uart_expect` / `uart_expect_send` 返回值）。
 #[derive(Debug)]
 pub struct ExpectOutcome {
@@ -583,9 +593,23 @@ impl SerialManager {
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
+        // 历史未读数据仍随本次结果返回，但不能让它在新命令响应到达前立即满足
+        // idle/max_bytes。记录写入前版本，等到读线程至少 push 一次新上行数据后，
+        // 才允许按正常收尾条件返回；timeout 始终可结束等待。
+        let revision_before_write = buffer.stats_with_revision().2;
         let written = write_locked(&port, data)?;
         let outcome = self
-            .read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
+            .read_locked(
+                buffer,
+                last_overflow,
+                port,
+                ReadLimits {
+                    idle_ms,
+                    max_bytes,
+                    timeout_ms,
+                    require_revision_after: Some(revision_before_write),
+                },
+            )
             .await?;
         Ok((written, outcome))
     }
@@ -864,8 +888,18 @@ impl SerialManager {
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
-        self.read_locked(buffer, last_overflow, port, idle_ms, max_bytes, timeout_ms)
-            .await
+        self.read_locked(
+            buffer,
+            last_overflow,
+            port,
+            ReadLimits {
+                idle_ms,
+                max_bytes,
+                timeout_ms,
+                require_revision_after: None,
+            },
+        )
+        .await
     }
 
     async fn read_locked(
@@ -873,18 +907,19 @@ impl SerialManager {
         buffer: Arc<RingBuf>,
         last_overflow: Arc<Mutex<u64>>,
         port: Arc<Mutex<Box<dyn SerialPort>>>,
-        idle_ms: u64,
-        max_bytes: usize,
-        timeout_ms: u64,
+        limits: ReadLimits,
     ) -> Result<ReadOutcome, String> {
-        let idle = Duration::from_millis(idle_ms);
-        let timeout = Duration::from_millis(timeout_ms);
+        let idle = Duration::from_millis(limits.idle_ms);
+        let timeout = Duration::from_millis(limits.timeout_ms);
         let start = Instant::now();
 
         let reason = loop {
-            let (cur_len, _) = buffer.stats();
+            let (cur_len, _, revision) = buffer.stats_with_revision();
             let age = buffer.last_write_age();
-            if cur_len > 0 && age >= idle {
+            let has_required_data = limits
+                .require_revision_after
+                .is_none_or(|before| revision != before);
+            if has_required_data && cur_len > 0 && age >= idle {
                 // 串口驱动缓冲是否仍有未搬入环形缓冲的数据（读线程尚未读完）。
                 // 端口拔出/驱动故障时传播错误，避免把故障误判为"响应结束"。
                 let drv_empty = {
@@ -897,7 +932,7 @@ impl SerialManager {
                     break ReadReason::Idle;
                 }
             }
-            if cur_len >= max_bytes {
+            if has_required_data && cur_len >= limits.max_bytes {
                 break ReadReason::MaxBytes;
             }
             if start.elapsed() >= timeout {

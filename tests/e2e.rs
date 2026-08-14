@@ -90,6 +90,43 @@ async fn e2e_tool_registration_and_errors() {
     assert!(open_tool.description.is_some());
     assert!(!open_tool.input_schema.is_empty());
 
+    // 带参工具的 Schema 应与运行时校验一致：拒绝未知字段。
+    for tool in tools
+        .tools
+        .iter()
+        .filter(|tool| tool.name != "uart_list_ports")
+    {
+        assert_eq!(
+            tool.input_schema.get("additionalProperties"),
+            Some(&json!(false)),
+            "{} 的 Schema 应显式拒绝未知字段: {:?}",
+            tool.name,
+            tool.input_schema
+        );
+    }
+    let configure_tool = tools
+        .tools
+        .iter()
+        .find(|tool| tool.name == "uart_configure")
+        .expect("缺少 uart_configure");
+    assert!(
+        configure_tool.input_schema["properties"]
+            .get("buffer_size")
+            .is_none(),
+        "buffer_size 只能在 uart_open 设置"
+    );
+    let expect_send_tool = tools
+        .tools
+        .iter()
+        .find(|tool| tool.name == "uart_expect_send")
+        .expect("缺少 uart_expect_send");
+    assert!(
+        expect_send_tool.input_schema["properties"]
+            .get("newline")
+            .is_some(),
+        "uart_expect_send Schema 应暴露 newline"
+    );
+
     // 2. uart_list_ports：无硬件也应成功（返回数组，可能为空）
     let r = call(&client, "uart_list_ports", json!({}))
         .await
@@ -390,6 +427,53 @@ async fn e2e_text_escaped_and_newline_params() {
     )
     .await;
     assert!(r.is_err(), "非法 read_mode 应触发 invalid_params");
+
+    // 7. expect_send 的 reply 支持 newline：合法值应进入端口检查，不能被静默忽略。
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41", "reply": "x", "reply_mode": "text", "newline": "crlf"}),
+    )
+    .await
+    .expect("expect_send 调用失败");
+    assert!(r.is_error.unwrap_or(false));
+    assert!(
+        structured_error_of(&r)
+            .unwrap_or_default()
+            .contains("未打开"),
+        "expect_send newline=crlf 应合法，收到参数错误: {r:?}"
+    );
+
+    // 8. 空 reply 不能靠 newline 绕过非空约束。
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41", "reply": "", "reply_mode": "text", "newline": "lf"}),
+    )
+    .await;
+    assert!(r.is_err(), "空 reply + newline 仍应触发 invalid_params");
+
+    // 9. 所有参数对象都应拒绝未知字段，防止拼错或传给不支持的工具时静默忽略。
+    let r = call(
+        &client,
+        "uart_configure",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "buffer_size": 65536}),
+    )
+    .await
+    .expect("未知字段应返回工具级参数错误");
+    assert!(
+        r.is_error.unwrap_or(false),
+        "configure 不支持的 buffer_size 应触发 invalid_params"
+    );
+
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41", "reply": "42", "newline_typo": "crlf"}),
+    )
+    .await
+    .expect("未知字段应返回工具级参数错误");
+    assert!(r.is_error.unwrap_or(false), "未知字段应触发 invalid_params");
 
     client.cancel().await.expect("关闭客户端失败");
 }

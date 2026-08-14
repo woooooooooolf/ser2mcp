@@ -7,6 +7,8 @@
 //! ```
 //!
 //! 覆盖（单测试函数顺序执行，避免多测试争用同一串口）：
+//! - `uart_expect_send` 为 reply 追加 CRLF，并验证回环字节
+//! - 历史缓冲存在时，`uart_exchange` 仍等到并返回本次新响应
 //! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
 //! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
 //! - 1KiB 小缓冲发送 64KiB → `uart_send_file` 直接报告上行覆盖增量
@@ -136,6 +138,20 @@ async fn open_port_with_buffer(
     assert!(!r.is_error.unwrap_or(false), "uart_open 报错: {r:?}");
 }
 
+async fn wait_for_buffered(client: &rmcp::Peer<rmcp::RoleClient>, port: &str, minimum: u64) {
+    for _ in 0..100 {
+        let r = call(client, "uart_available", json!({"port": port}))
+            .await
+            .expect("uart_available 调用失败");
+        let v = r.structured_content.expect("应有结构化返回");
+        if v["buffered_bytes"].as_u64().unwrap_or_default() >= minimum {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等待回环数据进入缓冲超时");
+}
+
 #[tokio::test]
 #[ignore = "需要真实回环硬件（TX-RX 短接）"]
 async fn loopback_send_file_all() {
@@ -144,8 +160,78 @@ async fn loopback_send_file_all() {
     let data = random_file(64 * 1024);
     let tmp = TempFile::new("all", &data);
 
-    // ============ 场景 1：text 模式往返 ============
+    // ============ 场景 1：expect_send 的 reply newline ============
     open_port(&client, &port).await;
+    let marker = "EXPECT-SEND-PATTERN";
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": port, "data": marker, "mode": "text"}),
+    )
+    .await
+    .expect("uart_write 调用失败");
+    assert!(!r.is_error.unwrap_or(false), "uart_write 报错: {r:?}");
+    let r = call(
+        &client,
+        "uart_expect_send",
+        json!({
+            "port": port,
+            "pattern": marker,
+            "pattern_mode": "text",
+            "reply": "R",
+            "reply_mode": "text",
+            "newline": "crlf",
+            "read_mode": "text-escaped",
+            "timeout_ms": 3000
+        }),
+    )
+    .await
+    .expect("uart_expect_send 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["matched"], json!(true), "应命中回环 marker: {v:?}");
+    assert_eq!(v["written"], json!(3), "reply 应追加 CRLF: {v:?}");
+    assert_eq!(v["newline"], json!("crlf"));
+    let reply_hex = read_all_hex(&client, &port).await;
+    assert_eq!(
+        hex::decode(&reply_hex).expect("hex 解码失败"),
+        b"R\r\n",
+        "expect_send reply 回环字节不一致"
+    );
+
+    // ============ 场景 2：exchange 不被历史静默缓冲提前收尾 ============
+    let old = b"OLD-BUFFER|";
+    let new = b"NEW-RESPONSE";
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": port, "data": String::from_utf8_lossy(old), "mode": "text"}),
+    )
+    .await
+    .expect("预置历史缓冲失败");
+    assert!(!r.is_error.unwrap_or(false), "uart_write 报错: {r:?}");
+    wait_for_buffered(&client, &port, old.len() as u64).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let r = call(
+        &client,
+        "uart_exchange",
+        json!({
+            "port": port,
+            "data": String::from_utf8_lossy(new),
+            "mode": "text",
+            "read_mode": "hex",
+            "idle_ms": 200,
+            "timeout_ms": 3000
+        }),
+    )
+    .await
+    .expect("uart_exchange 调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    let exchange_data =
+        hex::decode(v["data"].as_str().expect("应返回 hex data")).expect("exchange hex 解码失败");
+    assert_eq!([old.as_slice(), new.as_slice()].concat(), exchange_data);
+    assert_eq!(v["overflow_delta"], json!(0));
+
+    // ============ 场景 3：text 模式往返 ============
     let r = call(
         &client,
         "uart_send_file",
@@ -170,7 +256,7 @@ async fn loopback_send_file_all() {
     assert_eq!(back.len(), data.len(), "读回长度不一致");
     assert_eq!(back, data, "text 模式回环内容不一致");
 
-    // ============ 场景 2：base64 模式往返 ============
+    // ============ 场景 4：base64 模式往返 ============
     let _ = call(&client, "uart_clear", json!({"port": port}))
         .await
         .expect("uart_clear 调用失败");
@@ -197,7 +283,7 @@ async fn loopback_send_file_all() {
     let decoded = STANDARD.decode(stripped).expect("base64 解码失败");
     assert_eq!(decoded, data, "base64 模式回环解码后不一致");
 
-    // ============ 场景 3：小缓冲发送直接报告溢出 ============
+    // ============ 场景 5：小缓冲发送直接报告溢出 ============
     let _ = call(&client, "uart_close", json!({"port": port}))
         .await
         .expect("uart_close 调用失败");
@@ -229,7 +315,7 @@ async fn loopback_send_file_all() {
         .expect("uart_close 调用失败");
     open_port(&client, &port).await;
 
-    // ============ 场景 4：uart_send_cancel 并发中止 ============
+    // ============ 场景 6：uart_send_cancel 并发中止 ============
     let _ = call(&client, "uart_clear", json!({"port": port}))
         .await
         .expect("uart_clear 调用失败");
@@ -276,7 +362,7 @@ async fn loopback_send_file_all() {
     assert_eq!(v["send"]["active"], json!(false));
     assert_eq!(v["send"]["last_reason"], json!("cancelled"));
 
-    // ============ 场景 5：uart_close 并发中断 ============
+    // ============ 场景 7：uart_close 并发中断 ============
     let client3 = client.clone();
     let port3 = port.clone();
     let path3 = tmp.path.clone();
@@ -314,7 +400,7 @@ async fn loopback_send_file_all() {
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false), "close 后端口应已关闭");
 
-    // ============ 场景 6：原始 JSON-RPC 取消通知（notifications/cancelled） ============
+    // ============ 场景 8：原始 JSON-RPC 取消通知（notifications/cancelled） ============
     raw_cancelled_notification_test(&port, &tmp.path).await;
 
     client.cancel().await.expect("关闭客户端失败");

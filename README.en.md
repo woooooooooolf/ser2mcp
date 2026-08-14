@@ -83,7 +83,11 @@ Reasonix installs both SKILLs with the plugin. Claude Code, Codex, and other age
 Important semantic boundaries:
 
 - `reason="idle"` only means that the byte stream became quiet; it does not mean that a command completed. Use `uart_expect` when a prompt or end marker is available.
+- `uart_exchange` returns pre-existing buffered data, but idle or byte-limit completion is not allowed until at least one new ingress batch is observed after the current write.
 - When terminal input echo is enabled, a pattern contained in the command can make `uart_expect` match early. Disable echo or use an output marker whose complete pattern does not occur contiguously in the command text.
+- `uart_expect_send.newline` applies to `reply`. For a terminal reply, use `reply_mode="text"` with `newline="crlf"` instead of embedding the line ending in the reply text.
+- By default, `uart_expect` consumes only through the end of the pattern. Follow it with `uart_read` only when `buffered_bytes > 0` or when output after the pattern is needed.
+- Tools with arguments reject unknown fields instead of silently ignoring them. `buffer_size` can only be set by `uart_open`; close and reopen the port to change it.
 - `overflow_delta > 0` means that ring-buffer data was overwritten, so the current read has a gap.
 - The overflow fields from `uart_send_file` are return-time snapshots. Check the latest `overflow_total` with `uart_available` or `uart_read` afterward; zero is not final proof that no overflow occurred.
 - `uart_send_file` returning `reason="completed"` only means that the server finished writing. Confirm end-to-end integrity with peer byte counts and a hash of the decoded content.

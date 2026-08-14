@@ -83,7 +83,11 @@ Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等
 最重要的语义边界：
 
 - `reason="idle"` 只表示字节流静默，不表示命令已完成；有提示符或结束标记时使用 `uart_expect`
+- `uart_exchange` 会返回调用前已有的历史缓冲，但只有观察到本次写入后的新上行数据，才允许按 idle 或字节上限收尾
 - 终端开启输入回显时，命令中包含的 pattern 会让 `uart_expect` 提前命中；关闭回显，或使用完整 pattern 不连续出现在命令文本中的输出锚点
+- `uart_expect_send.newline` 作用于 `reply`；终端回复可传 `reply_mode="text"` 和 `newline="crlf"`，不需要把行尾嵌入 reply 文本
+- `uart_expect` 默认只消费到 pattern 结尾；仅当返回的 `buffered_bytes > 0` 或确实需要 pattern 后的尾部输出时，再补一次 `uart_read`
+- 带参数工具的未知字段会报错，不再静默忽略；`buffer_size` 只能在 `uart_open` 时设置，需调整时先关闭再重新打开端口
 - `overflow_delta > 0` 表示环形缓冲已有数据被覆盖，当前读取结果存在缺口
 - `uart_send_file` 的 overflow 是返回时快照；返回后用 `uart_available` / `uart_read` 再确认最新 `overflow_total`，0 不代表最终无溢出
 - `uart_send_file` 的 `reason="completed"` 只表示服务器已完成写入；端到端完整性必须用对端长度和解码后哈希确认
