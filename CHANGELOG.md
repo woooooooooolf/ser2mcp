@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-08-14
+
+### Added
+
+- 为 `uart_expect` 与 `uart_expect_send` 增加可选 `match_scope="buffer" | "new"`：默认保持历史缓冲匹配行为，`new` 只允许调用后到达的字节触发 pattern，同时保留 FIFO 消费语义
+- 为同步阻塞的 `uart_send_file` 增加可选 `max_duration_ms` 自动止损；显式时限到达时返回 `reason="duration_limit"` 和已发送进度
+
+### Changed
+
+- 将 expect 判定统一为协议无关的原始字节语义，并分别说明回显终端、AT/无回显 MCU 与二进制帧协议的锚点选择；不再把命令回显检查作为全局规则
+- 明确文件发送默认等待完成，`uart_send_cancel` 能否在发送期间或后续会话调用取决于宿主并发与服务生命周期；同步更新 MCP instructions、Schema、README 和两个 SKILL
+
 ### Fixed
 
 - 将 Release 工作流实际为 ARM64 的 macOS 产物从 `macos-x64` 更名为 `macos-arm64`，并在构建前校验 Runner 架构，避免平台名称与二进制架构不一致
@@ -223,4 +235,5 @@
 [0.8.3]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.3
 [0.8.4]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.4
 [0.8.5]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.5
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.5...HEAD
+[0.8.6]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.6
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.6...HEAD

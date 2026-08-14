@@ -1,6 +1,6 @@
 [package]
 name = "ser2mcp"
-version = "0.8.5"
+version = "0.8.6"
 edition = "2024"
 rust-version = "1.85"
 description = "UART serial port MCP server: expose local serial ports to AI assistants as standard MCP tools"
