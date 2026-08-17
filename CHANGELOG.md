@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-08-18
+
 ### Added
 
 - 为读取类返回与 `uart_available` 增加 `pending` 未读缓冲快照，并为 `uart_read` / `uart_exchange` 增加 `new_data_observed`，区分调用后新上行数据与历史缓冲
@@ -249,4 +251,5 @@
 [0.8.4]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.4
 [0.8.5]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.5
 [0.8.6]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.6
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.6...HEAD
+[0.8.7]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.7
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.7...HEAD
