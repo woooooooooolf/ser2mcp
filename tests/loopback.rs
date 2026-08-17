@@ -11,6 +11,7 @@
 //! - `match_scope=new` 忽略历史 pattern，且新数据仍可命中
 //! - `ignore_ansi=true` 可跨颜色控制序列匹配可见文本，同时保留原始返回字节
 //! - 历史缓冲存在时，`uart_exchange` 仍等到并返回本次新响应
+//! - `uart_clear` 与 exchange 并发时，空结果只能以 timeout 返回
 //! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
 //! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
 //! - 1KiB 小缓冲发送 64KiB → `uart_send_file` 直接报告上行覆盖增量
@@ -346,6 +347,49 @@ async fn loopback_send_file_all() {
     assert_eq!([old.as_slice(), new.as_slice()].concat(), exchange_data);
     assert_eq!(v["overflow_delta"], json!(0));
     assert_eq!(v["new_data_observed"], json!(true));
+
+    // ============ 场景 2b：并发 clear 不得制造 bytes=0 的 idle/max_bytes ============
+    for round in 0..8 {
+        let _ = call(&client, "uart_clear", json!({"port": port}))
+            .await
+            .expect("竞态测试前 uart_clear 失败");
+        let race_client = client.clone();
+        let race_port = port.clone();
+        let marker = format!("CLEAR-RACE-{round:02}-{}", "X".repeat(128));
+        let exchange_task = tokio::spawn(async move {
+            call(
+                &race_client,
+                "uart_exchange",
+                json!({
+                    "port": race_port,
+                    "data": marker,
+                    "mode": "text",
+                    "read_mode": "hex",
+                    "idle_ms": 0,
+                    "timeout_ms": 250
+                }),
+            )
+            .await
+        });
+        // clear 不持有全局 I/O 锁，反复清理可覆盖“状态判定 → 实际消费”的竞态窗口。
+        for _ in 0..20 {
+            let _ = call(&client, "uart_clear", json!({"port": port}))
+                .await
+                .expect("并发 uart_clear 失败");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let r = exchange_task
+            .await
+            .expect("竞态 exchange task 崩溃")
+            .expect("竞态 uart_exchange 调用失败");
+        let v = r.structured_content.expect("应有结构化返回");
+        let bytes = v["bytes"].as_u64().unwrap();
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            bytes > 0 || reason == "timeout",
+            "空结果只能以 timeout 返回: round={round}, result={v:?}"
+        );
+    }
 
     // ============ 场景 3：text 模式往返 ============
     let r = call(
