@@ -52,6 +52,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 - 有设备协议定义的响应特征时用 uart_expect。matched=true 只证明原始字节流出现 pattern，不代表事务成功；按终端提示符、AT 状态码、事务标识或二进制帧字段选择锚点。
 - 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。uart_exchange 保留并返回历史缓冲，但会先等到本次写入后至少一批新上行数据，才允许 idle/max_bytes 收尾。
 - reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
+- 读取结果的 pending=true 只表示返回快照中仍有未读缓冲；false 不证明未来不会继续到达数据。read/exchange 的 new_data_observed 表示调用后是否观察到新上行数据。
 - 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
 - pattern 是大小写敏感的原始字节子串，不支持正则。match_scope="buffer"（默认）允许历史未读数据参与；只等待调用后的新数据时用 "new"。
 - buffer_size 只能在 uart_open 时设置；需要调整时先 uart_close 再重新打开。所有带参数的工具都拒绝未知字段。
@@ -479,6 +480,7 @@ fn expect_result(
         "overflow_delta": outcome.overflow_delta,
         "overflow_total": outcome.overflow_total,
         "buffered_bytes": outcome.buffered,
+        "pending": outcome.buffered > 0,
     }))
 }
 
@@ -821,7 +823,7 @@ impl Ser2Mcp {
     /// 三者之一满足时返回全部未读数据。
     /// 返回值含 overflow_delta/overflow_total（缓冲溢出被覆盖丢弃的字节数，>0 表示数据有缺口）。
     #[tool(
-        description = "读取串口上行缓冲（port 必填；后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）及溢出统计。"
+        description = "读取串口上行缓冲（port 必填；后台持续囤积，按需拉取）。返回 data、bytes、reason（idle/max_bytes/timeout）、new_data_observed、pending 快照及溢出统计；pending=false 不保证未来无新数据。"
     )]
     async fn uart_read(
         &self,
@@ -851,6 +853,8 @@ impl Ser2Mcp {
                     "overflow_delta": outcome.overflow_delta,
                     "overflow_total": outcome.overflow_total,
                     "buffered_bytes": outcome.buffered,
+                    "pending": outcome.buffered > 0,
+                    "new_data_observed": outcome.new_data_observed,
                 })))
             }
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
@@ -862,7 +866,7 @@ impl Ser2Mcp {
     /// 仍会返回，但只有观察到本次写入后的新上行数据，才允许 idle/max_bytes 收尾。
     /// 适合短命令/无锚点场景（如 AT 查询）；长命令（存在中间静默期）改用 uart_expect。
     #[tool(
-        description = "发送数据并等待回复（port 必填；写入与读取在同一 I/O 临界区完成）。历史缓冲仍会返回，但不能单独触发 idle/max_bytes；收尾前至少等到一批写入后的新上行数据。适合短命令；返回 written、data、reason 及溢出统计。"
+        description = "发送数据并等待回复（port 必填；写入与读取在同一 I/O 临界区完成）。历史缓冲仍会返回，但不能单独触发 idle/max_bytes；收尾前至少等到一批写入后的新上行数据。适合短命令；返回 written、data、reason、new_data_observed、pending 快照及溢出统计。"
     )]
     async fn uart_exchange(
         &self,
@@ -909,6 +913,8 @@ impl Ser2Mcp {
                     "overflow_delta": outcome.overflow_delta,
                     "overflow_total": outcome.overflow_total,
                     "buffered_bytes": outcome.buffered,
+                    "pending": outcome.buffered > 0,
+                    "new_data_observed": outcome.new_data_observed,
                 })))
             }
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),

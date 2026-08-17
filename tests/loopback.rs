@@ -235,6 +235,11 @@ async fn loopback_send_file_all() {
     );
     assert_eq!(v["written"], json!(0), "未命中不得发送 reply: {v:?}");
     assert_eq!(v["match_scope"], json!("new"));
+    assert_eq!(
+        v["pending"],
+        json!(true),
+        "未消费的历史 marker 应明确标记 pending: {v:?}"
+    );
 
     let r = call(
         &client,
@@ -293,6 +298,7 @@ async fn loopback_send_file_all() {
         hex::decode(v["data"].as_str().expect("应返回 hex data")).expect("exchange hex 解码失败");
     assert_eq!([old.as_slice(), new.as_slice()].concat(), exchange_data);
     assert_eq!(v["overflow_delta"], json!(0));
+    assert_eq!(v["new_data_observed"], json!(true));
 
     // ============ 场景 3：text 模式往返 ============
     let r = call(

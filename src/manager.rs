@@ -166,6 +166,10 @@ pub struct ReadOutcome {
     pub overflow_total: u64,
     /// 取走后缓冲中剩余的未读字节数。
     pub buffered: usize,
+    /// 本次调用开始（`uart_exchange` 为写入开始）后，是否观察到新的上行数据。
+    ///
+    /// 返回数据仍可能包含调用前的历史缓冲；本字段只描述是否出现过新的读线程写入。
+    pub new_data_observed: bool,
 }
 
 /// 读取返回原因。
@@ -251,6 +255,8 @@ pub struct AvailableInfo {
     pub buffer_size: Option<usize>,
     /// 缓冲中未读字节数。
     pub buffered_bytes: usize,
+    /// 当前是否存在未读缓冲数据（`buffered_bytes > 0` 的便捷快照）。
+    pub pending: bool,
     /// 累计溢出字节数（缓冲写满被覆盖丢弃）。
     pub overflow_total: u64,
     /// 读线程的致命错误（端口被拔等），正常时为 `None`。
@@ -967,10 +973,16 @@ impl SerialManager {
         let idle = Duration::from_millis(limits.idle_ms);
         let timeout = Duration::from_millis(limits.timeout_ms);
         let start = Instant::now();
+        // exchange 的基线建立在写入前，避免快速响应在进入 read_locked 前已到达时
+        // 被误判为历史数据；普通 read 则以调用开始时的写入版本为观测基线。
+        let observation_revision = limits
+            .require_revision_after
+            .unwrap_or_else(|| buffer.stats_with_revision().2);
 
-        let reason = loop {
+        let (reason, data, overflow_total, new_data_observed) = loop {
             let (cur_len, _, revision) = buffer.stats_with_revision();
             let age = buffer.last_write_age();
+            let new_data_observed = revision != observation_revision;
             let has_required_data = limits
                 .require_revision_after
                 .is_none_or(|before| revision != before);
@@ -984,14 +996,37 @@ impl SerialManager {
                         == 0
                 };
                 if drv_empty {
-                    break ReadReason::Idle;
+                    // uart_clear 不持有全局 I/O 锁，可能恰好在上方状态检查后清空
+                    // 缓冲。把“判定 + 消费”后的空结果继续等待，保证 idle 不会
+                    // 携带 bytes=0 返回。
+                    let (data, overflow_total) = buffer.take_all();
+                    if !data.is_empty() {
+                        break (ReadReason::Idle, data, overflow_total, new_data_observed);
+                    }
+                    continue;
                 }
             }
             if has_required_data && cur_len >= limits.max_bytes {
-                break ReadReason::MaxBytes;
+                let (data, overflow_total) = buffer.take_all();
+                if !data.is_empty() {
+                    break (
+                        ReadReason::MaxBytes,
+                        data,
+                        overflow_total,
+                        new_data_observed,
+                    );
+                }
+                continue;
             }
             if start.elapsed() >= timeout {
-                break ReadReason::Timeout;
+                let (data, overflow_total) = buffer.take_all();
+                let revision = buffer.stats_with_revision().2;
+                break (
+                    ReadReason::Timeout,
+                    data,
+                    overflow_total,
+                    revision != observation_revision,
+                );
             }
             // 等待新数据或周期性复查
             tokio::select! {
@@ -1000,7 +1035,6 @@ impl SerialManager {
             }
         };
 
-        let (data, overflow_total) = buffer.take_all();
         let mut last = last_overflow.lock().unwrap();
         let overflow_delta = overflow_total.saturating_sub(*last);
         *last = overflow_total;
@@ -1012,6 +1046,7 @@ impl SerialManager {
             overflow_delta,
             overflow_total,
             buffered,
+            new_data_observed,
         })
     }
 
@@ -1030,6 +1065,7 @@ impl SerialManager {
                 read_timeout_ms: None,
                 buffer_size: None,
                 buffered_bytes: 0,
+                pending: false,
                 overflow_total: 0,
                 read_error: None,
                 send: SendProgress::default(),
@@ -1048,6 +1084,7 @@ impl SerialManager {
                     read_timeout_ms: Some(cfg.read_timeout_ms),
                     buffer_size: Some(cfg.buffer_size),
                     buffered_bytes: buffered,
+                    pending: buffered > 0,
                     overflow_total,
                     read_error: ap.read_error.lock().unwrap().clone(),
                     send: ap.send.snapshot(),

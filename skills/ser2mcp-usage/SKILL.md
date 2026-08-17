@@ -64,11 +64,13 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
   - `idle`：最后一个字节后持续 `idle_ms` 无新数据；可能只是中间静默。
   - `max_bytes`：未读数据达到 `max_bytes`；继续读取剩余数据。
   - `timeout`：总等待达到 `timeout_ms`；结合实际返回内容判断是否已有部分响应。
+- `uart_read` / `uart_exchange` 只有 `timeout` 才可能伴随 `bytes=0`。`new_data_observed` 表示调用后是否观察到新上行数据；返回历史缓冲时它可能为 false。
+- `pending=true` 表示返回快照中仍有未读缓冲，应继续 `uart_read`；`pending=false` 只表示该瞬间缓冲为空，不证明设备不会继续输出，也不证明命令完成。
 - `uart_exchange` 会保留并返回调用前的历史缓冲，但历史数据不会单独触发 idle/max_bytes；收尾前至少等到一批本次写入后的新上行数据。
 - `uart_expect` 的 pattern 是大小写敏感的原始字节子串，不支持正则。`matched=true` 只证明该字节序列出现，不证明它来自当前事务或具有设备协议上的成功含义。
 - `match_scope="buffer"`（默认）同时匹配历史未读与调用后新数据；只等待未来响应或事件时用 `"new"`。`new` 只限制 pattern 起点，`consume=true` 的返回仍可能包含水位之前的历史前缀。
 - `consume=true`（默认）只消费到 pattern 结尾；pattern 之后的数据保留在缓冲，会进入后续读取。
-- `uart_expect` 返回后，仅当 `buffered_bytes > 0` 或确实需要 pattern 后的尾部输出时，再补一次 `uart_read`；不要把 follow-up read 当成固定步骤。
+- `uart_expect` 返回后，`pending=true`（等价于 `buffered_bytes > 0`）时补一次 `uart_read`；`pending=false` 仍是瞬时快照，确实需要 pattern 后的未来输出时继续按协议等待。不要把 follow-up read 当成固定步骤。
 - 不要固定在 expect 前调用 `uart_clear`：历史数据无价值且允许丢弃时可清理；需要保留启动日志、异步事件或遥测时使用 `match_scope="new"`。
 - `overflow_delta > 0` 表示本次观察区间内有字节被覆盖；调大 `buffer_size` 或更频繁地读取，并重新获取关键数据。
 

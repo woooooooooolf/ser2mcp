@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 为读取类返回与 `uart_available` 增加 `pending` 未读缓冲快照，并为 `uart_read` / `uart_exchange` 增加 `new_data_observed`，区分调用后新上行数据与历史缓冲
+
+### Fixed
+
+- 修复并发 `uart_clear` 可能落在 idle/max_bytes 判定与实际消费之间，导致读取类工具以非超时原因返回 `bytes=0` 的竞态；空消费现在继续等待至新数据或总超时
+
 ## [0.8.6] - 2026-08-14
 
 ### Added
