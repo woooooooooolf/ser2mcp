@@ -49,12 +49,13 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
 - 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
 - 二进制使用 mode/read_mode="hex"；终端命令和 uart_expect_send.reply 使用 text 时都应显式指定 newline，读取优先用 read_mode="text-escaped"。
-- 有设备协议定义的响应特征时用 uart_expect。matched=true 只证明原始字节流出现 pattern，不代表事务成功；按终端提示符、AT 状态码、事务标识或二进制帧字段选择锚点。
+- 有设备协议定义的响应特征时用 uart_expect。matched=true 只证明 pattern 按所选原始字节/忽略 ANSI 语义命中，不代表事务成功；按终端提示符、AT 状态码、事务标识或二进制帧字段选择锚点。
 - 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。uart_exchange 保留并返回历史缓冲，但会先等到本次写入后至少一批新上行数据，才允许 idle/max_bytes 收尾。
 - reason="idle" 只表示字节流静默，不表示命令完成。不要 sleep 盲等；一次只发送一条命令。
 - 读取结果的 pending=true 只表示返回快照中仍有未读缓冲；false 不证明未来不会继续到达数据。read/exchange 的 new_data_observed 表示调用后是否观察到新上行数据。
 - 每次读取都检查 overflow_delta；大于 0 表示缓冲覆盖导致数据缺口。
-- pattern 是大小写敏感的原始字节子串，不支持正则。match_scope="buffer"（默认）允许历史未读数据参与；只等待调用后的新数据时用 "new"。
+- pattern 大小写敏感且不支持正则，默认按原始字节匹配。match_scope="buffer"（默认）允许历史未读数据参与；只等待调用后的新数据时用 "new"。
+- 彩色终端中可给 expect 设置 ignore_ansi=true，让匹配跳过常见 ANSI 控制序列；该选项不修改原始缓冲或返回数据，默认 false。
 - buffer_size 只能在 uart_open 时设置；需要调整时先 uart_close 再重新打开。所有带参数的工具都拒绝未知字段。
 
 文件发送：
@@ -199,7 +200,7 @@ pub struct CloseArgs {
 pub struct ExpectArgs {
     /// 串口名，如 "COM3"（Windows）或 "/dev/ttyUSB0"（Linux/macOS）。
     pub port: String,
-    /// 要等待出现的非空原始字节子串（hex 或 text，取决于 pattern_mode），
+    /// 要等待出现的非空 pattern 字节串（hex 或 text，取决于 pattern_mode），
     /// 编码后上限 65536 字节；具体匹配范围由 match_scope 决定。
     pub pattern: String,
     /// pattern 编码：hex（默认）或 text。
@@ -212,6 +213,9 @@ pub struct ExpectArgs {
     /// 匹配范围：buffer（默认，历史未读数据与新数据都参与）/ new（仅允许调用开始后
     /// 到达的字节作为 pattern 起点；返回数据仍可能包含水位之前的历史前缀）。
     pub match_scope: Option<String>,
+    /// 匹配时是否忽略缓冲中的常见 ANSI 转义/控制序列，默认 false。
+    /// 仅影响 pattern 判定；消费范围和返回 data 仍保留原始 ANSI 字节。
+    pub ignore_ansi: Option<bool>,
     /// 可选：等待前先发送的数据（"发送+等待"一步完成），编码取决于 mode。
     /// 对开启输入回显的终端，若该数据连续包含 pattern，回显可能先于实际输出命中。
     pub data: Option<String>,
@@ -245,6 +249,9 @@ pub struct ExpectSendArgs {
     pub consume: Option<bool>,
     /// 匹配范围：buffer（默认）/ new（仅允许调用开始后到达的字节作为 pattern 起点）。
     pub match_scope: Option<String>,
+    /// 匹配时是否忽略缓冲中的常见 ANSI 转义/控制序列，默认 false。
+    /// 仅影响 pattern 判定；返回 data 仍保留原始 ANSI 字节。
+    pub ignore_ansi: Option<bool>,
     /// 返回 data 字段的编码：hex（默认）、text（非文本数据自动降级为 hex）或 text-escaped。
     pub read_mode: Option<String>,
 }
@@ -462,6 +469,7 @@ fn expect_result(
     read_mode: &str,
     newline: &str,
     match_scope: manager::MatchScope,
+    ignore_ansi: bool,
 ) -> CallToolResult {
     let (data, used_mode) = encode_recv(&outcome.data, read_mode);
     CallToolResult::structured(json!({
@@ -472,6 +480,7 @@ fn expect_result(
         "mode": used_mode,
         "newline": newline,
         "match_scope": match_scope_str(match_scope),
+        "ignore_ansi": ignore_ansi,
         "written": outcome.written,
         "reason": match outcome.reason {
             manager::ExpectReason::Matched => "matched",
@@ -923,13 +932,14 @@ impl Ser2Mcp {
 
     /// 等待串口输出中出现指定 pattern（内容匹配，替代 AI 侧 sleep+盲发 的时序编排）。
     /// 可选 `data` 实现"发送+等待"一步完成；命中（或超时）后返回。
-    /// `matched=true` 只表示匹配范围内出现原始字节 pattern，不解释设备协议语义。
+    /// `matched=true` 只表示 pattern 按所选原始字节/忽略 ANSI 语义命中，
+    /// 不解释设备协议语义。
     /// 默认 `match_scope=buffer`；`new` 只允许调用后新字节触发匹配。对开启输入回显
     /// 的终端，命令回显可能提前命中，应关闭回显或使用输入中不连续出现的输出锚点。
     /// `consume=true`（默认）时取走并返回"截至 pattern 结尾"的内容，pattern 之后
     /// 的字节留在缓冲；`consume=false` 时纯等待、数据不消费（可用 uart_read 取走诊断）。
     #[tool(
-        description = "等待串口输出中出现指定原始字节 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。matched 只证明字节命中，不代表设备事务成功。match_scope=buffer（默认）匹配历史未读与新数据；new 只允许调用后到达的字节作为 pattern 起点，但 consume 返回仍可能含历史前缀。consume=true（默认）时返回截至 pattern 结尾的内容。回显终端应避免让输入连续包含只应由实际输出产生的锚点；AT、无回显 MCU 和二进制协议应使用各自的状态码、事务标识或帧字段。"
+        description = "等待串口输出中出现指定 pattern（port、pattern 必填；可选 data 实现\"发送+等待\"）。默认按原始字节匹配；ignore_ansi=true 时匹配跳过常见 ANSI 控制序列，但消费和返回仍保留原始字节。matched 只证明所选语义下命中，不代表设备事务成功。match_scope=buffer（默认）匹配历史未读与新数据；new 只允许调用后到达的字节作为 pattern 起点，但 consume 返回仍可能含历史前缀。consume=true（默认）时返回截至 pattern 末个可见字节的内容。回显终端应避免让输入连续包含只应由实际输出产生的锚点；AT、无回显 MCU 和二进制协议应使用各自的状态码、事务标识或帧字段。"
     )]
     async fn uart_expect(
         &self,
@@ -963,6 +973,7 @@ impl Ser2Mcp {
             Ok(scope) => scope,
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
+        let ignore_ansi = args.ignore_ansi.unwrap_or(false);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
@@ -993,9 +1004,12 @@ impl Ser2Mcp {
                 &args.port,
                 send.as_deref(),
                 &pattern,
-                timeout_ms,
-                consume,
-                match_scope,
+                manager::ExpectOptions {
+                    timeout_ms,
+                    consume,
+                    match_scope,
+                    ignore_ansi,
+                },
             )
             .await
         {
@@ -1005,6 +1019,7 @@ impl Ser2Mcp {
                 &read_mode,
                 &newline,
                 match_scope,
+                ignore_ansi,
             )),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }
@@ -1016,7 +1031,7 @@ impl Ser2Mcp {
     /// 超时未命中时不发送 reply。等待未来事件时可用 `match_scope=new`，避免历史
     /// pattern 触发旧事件对应的 reply。
     #[tool(
-        description = "等待串口输出中出现指定原始字节 pattern 后立即发送 reply（port、pattern、reply 必填；newline 可给 reply 追加行尾；超时未命中不发送）。match_scope=buffer（默认）允许历史未读数据命中；等待未来事件时用 new，避免旧 pattern 触发 reply。matched 只证明字节命中，不代表设备事务成功。返回 matched、written、data 及溢出统计。"
+        description = "等待串口输出中出现指定 pattern 后立即发送 reply（port、pattern、reply 必填；newline 可给 reply 追加行尾；超时未命中不发送）。默认按原始字节匹配；ignore_ansi=true 时匹配跳过常见 ANSI 控制序列，但返回保留原始字节。match_scope=buffer（默认）允许历史未读数据命中；等待未来事件时用 new，避免旧 pattern 触发 reply。matched 只证明所选语义下命中，不代表设备事务成功。返回 matched、written、data 及溢出统计。"
     )]
     async fn uart_expect_send(
         &self,
@@ -1069,6 +1084,7 @@ impl Ser2Mcp {
             Ok(scope) => scope,
             Err(e) => return Err(McpError::invalid_params(e, None)),
         };
+        let ignore_ansi = args.ignore_ansi.unwrap_or(false);
         let read_mode = args.read_mode.unwrap_or_else(|| "hex".into());
         if let Err(e) = parse_recv_mode(&read_mode) {
             return Err(McpError::invalid_params(e, None));
@@ -1079,9 +1095,12 @@ impl Ser2Mcp {
                 &args.port,
                 &pattern,
                 &reply,
-                timeout_ms,
-                consume,
-                match_scope,
+                manager::ExpectOptions {
+                    timeout_ms,
+                    consume,
+                    match_scope,
+                    ignore_ansi,
+                },
             )
             .await
         {
@@ -1091,6 +1110,7 @@ impl Ser2Mcp {
                 &read_mode,
                 &newline,
                 match_scope,
+                ignore_ansi,
             )),
             Err(e) => Ok(CallToolResult::structured_error(json!({ "error": e }))),
         }

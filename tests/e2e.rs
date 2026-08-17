@@ -132,6 +132,12 @@ async fn e2e_tool_registration_and_errors() {
             .is_some(),
         "uart_expect_send Schema 应暴露 match_scope"
     );
+    assert!(
+        expect_send_tool.input_schema["properties"]
+            .get("ignore_ansi")
+            .is_some(),
+        "uart_expect_send Schema 应暴露 ignore_ansi"
+    );
     let expect_tool = tools
         .tools
         .iter()
@@ -142,6 +148,12 @@ async fn e2e_tool_registration_and_errors() {
             .get("match_scope")
             .is_some(),
         "uart_expect Schema 应暴露 match_scope"
+    );
+    assert!(
+        expect_tool.input_schema["properties"]
+            .get("ignore_ansi")
+            .is_some(),
+        "uart_expect Schema 应暴露 ignore_ansi"
     );
     let send_file_tool = tools
         .tools
@@ -330,10 +342,10 @@ async fn e2e_tool_registration_and_errors() {
     let r = call(
         &client,
         "uart_expect",
-        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "match_scope": "new", "timeout_ms": 100}),
+        json!({"port": "COM_SER2MCP_NONEXISTENT", "pattern": "41 42", "match_scope": "new", "ignore_ansi": true, "timeout_ms": 100}),
     )
     .await
-    .expect("合法 match_scope 应进入端口检查");
+    .expect("合法 match_scope/ignore_ansi 应进入端口检查");
     assert!(r.is_error.unwrap_or(false));
 
     // 17. 参数校验：timeout_ms 超上限 → 协议级 invalid_params

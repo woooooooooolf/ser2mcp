@@ -7,6 +7,7 @@
 ### Added
 
 - 为读取类返回与 `uart_available` 增加 `pending` 未读缓冲快照，并为 `uart_read` / `uart_exchange` 增加 `new_data_observed`，区分调用后新上行数据与历史缓冲
+- 为 `uart_expect` / `uart_expect_send` 增加可选 `ignore_ansi=true`：匹配时跳过常见 CSI、OSC 等 ANSI 控制序列，同时保持原始缓冲、消费顺序与返回字节不变
 
 ### Fixed
 

@@ -9,6 +9,7 @@
 //! 覆盖（单测试函数顺序执行，避免多测试争用同一串口）：
 //! - `uart_expect_send` 为 reply 追加 CRLF，并验证回环字节
 //! - `match_scope=new` 忽略历史 pattern，且新数据仍可命中
+//! - `ignore_ansi=true` 可跨颜色控制序列匹配可见文本，同时保留原始返回字节
 //! - 历史缓冲存在时，`uart_exchange` 仍等到并返回本次新响应
 //! - text 模式发送 64KiB 确定性伪随机文件 → 读回逐字节比对
 //! - base64 模式发送 → 读回解码比对（每行 ≤ 76 字符）
@@ -265,6 +266,52 @@ async fn loopback_send_file_all() {
         json!(format!("{scope_marker}{scope_marker}")),
         "consume=true 仍应按 FIFO 返回历史前缀和新命中: {v:?}"
     );
+
+    // ============ 场景 1c：可选忽略 ANSI 序列匹配，原始数据保持不变 ============
+    let ansi_payload = b"\x1b[31mAB\x1b[0m\x1b[32mCD\x1b[0m|ANSI-TAIL";
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({
+            "port": port,
+            "data": hex::encode(ansi_payload),
+            "mode": "hex",
+            "pattern": "ABCD",
+            "pattern_mode": "text",
+            "match_scope": "new",
+            "read_mode": "hex",
+            "timeout_ms": 150
+        }),
+    )
+    .await
+    .expect("原始 ANSI 匹配调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["matched"], json!(false), "原始匹配不应跨 ANSI: {v:?}");
+    assert_eq!(v["pending"], json!(true));
+
+    let r = call(
+        &client,
+        "uart_expect",
+        json!({
+            "port": port,
+            "pattern": "ABCD",
+            "pattern_mode": "text",
+            "ignore_ansi": true,
+            "read_mode": "hex",
+            "timeout_ms": 1000
+        }),
+    )
+    .await
+    .expect("忽略 ANSI 匹配调用失败");
+    let v = r.structured_content.expect("应有结构化返回");
+    assert_eq!(v["matched"], json!(true), "应匹配可见 ABCD: {v:?}");
+    assert_eq!(v["ignore_ansi"], json!(true));
+    assert_eq!(
+        hex::decode(v["data"].as_str().expect("应返回 hex data")).unwrap(),
+        b"\x1b[31mAB\x1b[0m\x1b[32mCD",
+        "忽略 ANSI 只影响匹配，返回应保留原始字节"
+    );
+    let _ = read_all_hex(&client, &port).await;
 
     // ============ 场景 2：exchange 不被历史静默缓冲提前收尾 ============
     let old = b"OLD-BUFFER|";

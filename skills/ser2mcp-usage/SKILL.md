@@ -10,7 +10,7 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 - 按 `uart_list_ports → uart_open → 交互 → uart_close` 操作；重复打开同一端口前先关闭。
 - 除 `uart_list_ports` 和 `uart_send_estimate` 外，调用时都传 `port`。
 - 一次只发送一条命令，并用设备协议定义的响应特征判断完成；不要用 sleep 盲等。
-- 把 `matched=true` 解释为“匹配范围内出现原始字节 pattern”，不要直接解释为当前事务成功。
+- 把 `matched=true` 解释为“pattern 按所选原始字节/忽略 ANSI 语义在匹配范围内命中”，不要直接解释为当前事务成功。
 - 终端命令和 `uart_expect_send.reply` 显式带行尾。通常用 `newline="crlf"`；已知设备只需 LF 时用 `lf`。
 - 把 `reason="idle"` 解释为“字节流暂时静默”，不要解释为命令已完成。
 - 检查每次读取结果的 `overflow_delta`；大于 0 表示数据已被覆盖，当前结果有缺口。
@@ -52,6 +52,7 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 
 ```text
 uart_expect {port: "COM3", data: "ls /", mode: "text", newline: "crlf", pattern: "# ", pattern_mode: "text", read_mode: "text-escaped"}
+uart_expect {port: "COM3", pattern: "BUILD OK", pattern_mode: "text", ignore_ansi: true, read_mode: "text-escaped"}
 uart_expect {port: "COM3", pattern: "READY", pattern_mode: "text", match_scope: "new", read_mode: "text-escaped"}
 uart_exchange {port: "COM3", data: "AT\r\n", mode: "text", read_mode: "text-escaped"}
 uart_exchange {port: "COM3", data: "AA 55 01 00 0D 0A", mode: "hex", read_mode: "hex"}
@@ -67,7 +68,8 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - `uart_read` / `uart_exchange` 只有 `timeout` 才可能伴随 `bytes=0`。`new_data_observed` 表示调用后是否观察到新上行数据；返回历史缓冲时它可能为 false。
 - `pending=true` 表示返回快照中仍有未读缓冲，应继续 `uart_read`；`pending=false` 只表示该瞬间缓冲为空，不证明设备不会继续输出，也不证明命令完成。
 - `uart_exchange` 会保留并返回调用前的历史缓冲，但历史数据不会单独触发 idle/max_bytes；收尾前至少等到一批本次写入后的新上行数据。
-- `uart_expect` 的 pattern 是大小写敏感的原始字节子串，不支持正则。`matched=true` 只证明该字节序列出现，不证明它来自当前事务或具有设备协议上的成功含义。
+- `uart_expect` 的 pattern 大小写敏感且不支持正则。默认按原始字节匹配；仅在彩色终端中可设 `ignore_ansi=true` 跳过常见 CSI、OSC 等 ANSI 控制序列。该选项只影响匹配，返回 data 仍保留原始字节；二进制协议不要启用。
+- `matched=true` 只证明 pattern 按所选原始/忽略 ANSI 语义命中，不证明它来自当前事务或具有设备协议上的成功含义。
 - `match_scope="buffer"`（默认）同时匹配历史未读与调用后新数据；只等待未来响应或事件时用 `"new"`。`new` 只限制 pattern 起点，`consume=true` 的返回仍可能包含水位之前的历史前缀。
 - `consume=true`（默认）只消费到 pattern 结尾；pattern 之后的数据保留在缓冲，会进入后续读取。
 - `uart_expect` 返回后，`pending=true`（等价于 `buffered_bytes > 0`）时补一次 `uart_read`；`pending=false` 仍是瞬时快照，确实需要 pattern 后的未来输出时继续按协议等待。不要把 follow-up read 当成固定步骤。

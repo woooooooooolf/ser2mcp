@@ -94,8 +94,9 @@ Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等
 - `uart_exchange` 会返回调用前已有的历史缓冲，但只有观察到本次写入后的新上行数据，才允许按 idle 或字节上限收尾
 - `uart_read` / `uart_exchange` 的 `new_data_observed` 表示调用后是否观察到新上行数据；`pending` 表示返回快照中仍有未读缓冲。`pending=false` 不证明设备之后不会继续输出，也不代表命令完成
 - `uart_read` / `uart_exchange` 只有 `reason="timeout"` 才可能返回 `bytes=0`；并发清缓冲不会再产生空的 idle/max_bytes 结果
-- `matched=true` 只证明匹配范围内出现了原始字节 pattern，不代表设备事务成功；终端用提示符/输出标记，AT 或无回显 MCU 用状态码/事务标识，二进制协议用帧字段与校验
+- `matched=true` 只证明 pattern 按所选的原始字节/忽略 ANSI 语义在匹配范围内命中，不代表设备事务成功；终端用提示符/输出标记，AT 或无回显 MCU 用状态码/事务标识，二进制协议用帧字段与校验
 - `uart_expect.match_scope="buffer"`（默认）允许历史未读数据参与匹配；只等待调用后的新数据时用 `"new"`。对开启输入回显的终端，关闭回显或使用完整 pattern 不连续出现在命令文本中的输出锚点
+- pattern 默认按原始字节匹配；彩色终端中可显式设置 `ignore_ansi=true`，让匹配跳过常见 CSI、OSC 等 ANSI 控制序列。该选项不修改原始缓冲或返回数据，二进制协议不要启用
 - `uart_expect_send.newline` 作用于 `reply`；终端回复可传 `reply_mode="text"` 和 `newline="crlf"`，不需要把行尾嵌入 reply 文本
 - `uart_expect` 默认只消费到 pattern 结尾；返回的 `pending=true`（等价于 `buffered_bytes > 0`）时补一次 `uart_read`。`pending=false` 仍只是瞬时快照；确实需要 pattern 后的未来输出时继续按协议等待
 - 带参数工具的未知字段会报错，不再静默忽略；`buffer_size` 只能在 `uart_open` 时设置，需调整时先关闭再重新打开端口

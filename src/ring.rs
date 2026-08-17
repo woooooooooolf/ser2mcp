@@ -8,6 +8,7 @@
 //! 并发模型：`RingBuf` 内部用 `std::sync::Mutex` 保护环形区（临界区极短），
 //! 写入后通过 `tokio::sync::Notify` 唤醒等待中的读取者。
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -112,6 +113,32 @@ impl RingBuf {
         };
         let out = match pos {
             Some(p) if consume => take_prefix_inner(&mut inner, p + pattern.len()),
+            _ => Vec::new(),
+        };
+        (pos, out, inner.overflow_total)
+    }
+
+    /// 忽略缓冲中的 ANSI 转义/控制序列后查找可见字节 pattern。
+    ///
+    /// ANSI 处理只影响匹配候选，不修改原始缓冲：`consume=true` 时仍按 FIFO
+    /// 语义取走未读区起点至“最后一个匹配可见字节”的全部原始数据，返回内容
+    /// 因而保留 ANSI 字节。`min_position` 与 [`Self::find_and_take_from`] 相同，
+    /// 可限制 pattern 的首个可见字节不得早于调用时水位。
+    pub fn find_and_take_ignoring_ansi(
+        &self,
+        pattern: &[u8],
+        consume: bool,
+        min_position: Option<u64>,
+    ) -> (Option<usize>, Vec<u8>, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let start_offset = min_position.map_or(0, |position| {
+            let buffer_start = inner.write_position.saturating_sub(inner.len as u64);
+            position.saturating_sub(buffer_start).min(inner.len as u64) as usize
+        });
+        let matched = find_ignoring_ansi_from_offset(&inner, pattern, start_offset);
+        let pos = matched.map(|(start, _)| start);
+        let out = match matched {
+            Some((_, end)) if consume => take_prefix_inner(&mut inner, end),
             _ => Vec::new(),
         };
         (pos, out, inner.overflow_total)
@@ -312,6 +339,170 @@ fn find_in_from_offset(inner: &RingBuffer, pattern: &[u8], start_offset: usize) 
             matched += 1;
             if matched == m {
                 return Some(pos + 1 - m);
+            }
+        }
+    }
+    None
+}
+
+/// ANSI 匹配扫描状态。这里处理终端常见的 CSI、OSC 及由 ST 结束的字符串类
+/// 控制序列；其它两字节 ESC 序列也作为不可见控制序列跳过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnsiState {
+    Ground,
+    Escape,
+    EscapeIntermediate,
+    Csi,
+    Osc,
+    OscEscape,
+    StString,
+    StStringEscape,
+}
+
+/// 忽略 ANSI 序列后执行 KMP 查找，返回原始缓冲中的 `(起点, 终点开区间)`。
+/// 扫描从缓冲起点开始，以便 `start_offset` 落在跨水位 ANSI 序列中时仍能正确
+/// 识别状态；只有原始位置不早于水位的可见字节才参与 pattern 匹配。
+fn find_ignoring_ansi_from_offset(
+    inner: &RingBuffer,
+    pattern: &[u8],
+    start_offset: usize,
+) -> Option<(usize, usize)> {
+    let start_offset = start_offset.min(inner.len);
+    if pattern.is_empty() {
+        return Some((start_offset, start_offset));
+    }
+    if pattern.len() > MAX_PATTERN_SIZE {
+        return None;
+    }
+
+    let tail = inner.tail();
+    let first = (inner.capacity - tail).min(inner.len);
+    let (seg1, seg2) = (
+        &inner.data[tail..tail + first],
+        &inner.data[..inner.len - first],
+    );
+    let byte_at = |idx: usize| {
+        if idx < first {
+            seg1[idx]
+        } else {
+            seg2[idx - first]
+        }
+    };
+
+    let m = pattern.len();
+    let mut prefix = vec![0usize; m];
+    let mut prefix_len = 0;
+    for i in 1..m {
+        while prefix_len > 0 && pattern[i] != pattern[prefix_len] {
+            prefix_len = prefix[prefix_len - 1];
+        }
+        if pattern[i] == pattern[prefix_len] {
+            prefix_len += 1;
+        }
+        prefix[i] = prefix_len;
+    }
+
+    let mut state = AnsiState::Ground;
+    let mut matched = 0usize;
+    let mut recent_positions = VecDeque::with_capacity(m);
+    for pos in 0..inner.len {
+        let byte = byte_at(pos);
+        let visible = match state {
+            AnsiState::Ground => match byte {
+                0x1B => {
+                    state = AnsiState::Escape;
+                    None
+                }
+                0x9B => {
+                    state = AnsiState::Csi;
+                    None
+                }
+                0x9D => {
+                    state = AnsiState::Osc;
+                    None
+                }
+                0x90 | 0x98 | 0x9E | 0x9F => {
+                    state = AnsiState::StString;
+                    None
+                }
+                0x80..=0x9F => None,
+                _ => Some(byte),
+            },
+            AnsiState::Escape => {
+                state = match byte {
+                    b'[' => AnsiState::Csi,
+                    b']' => AnsiState::Osc,
+                    b'P' | b'X' | b'^' | b'_' => AnsiState::StString,
+                    0x1B => AnsiState::Escape,
+                    0x20..=0x2F => AnsiState::EscapeIntermediate,
+                    _ => AnsiState::Ground,
+                };
+                None
+            }
+            AnsiState::EscapeIntermediate => {
+                state = match byte {
+                    0x1B => AnsiState::Escape,
+                    0x30..=0x7E => AnsiState::Ground,
+                    _ => AnsiState::EscapeIntermediate,
+                };
+                None
+            }
+            AnsiState::Csi => {
+                state = match byte {
+                    0x1B => AnsiState::Escape,
+                    0x40..=0x7E => AnsiState::Ground,
+                    _ => AnsiState::Csi,
+                };
+                None
+            }
+            AnsiState::Osc => {
+                state = match byte {
+                    0x07 | 0x9C => AnsiState::Ground,
+                    0x1B => AnsiState::OscEscape,
+                    _ => AnsiState::Osc,
+                };
+                None
+            }
+            AnsiState::OscEscape => {
+                state = match byte {
+                    b'\\' => AnsiState::Ground,
+                    0x1B => AnsiState::OscEscape,
+                    _ => AnsiState::Osc,
+                };
+                None
+            }
+            AnsiState::StString => {
+                state = match byte {
+                    0x9C => AnsiState::Ground,
+                    0x1B => AnsiState::StStringEscape,
+                    _ => AnsiState::StString,
+                };
+                None
+            }
+            AnsiState::StStringEscape => {
+                state = match byte {
+                    b'\\' => AnsiState::Ground,
+                    0x1B => AnsiState::StStringEscape,
+                    _ => AnsiState::StString,
+                };
+                None
+            }
+        };
+
+        let Some(byte) = visible.filter(|_| pos >= start_offset) else {
+            continue;
+        };
+        recent_positions.push_back(pos);
+        if recent_positions.len() > m {
+            recent_positions.pop_front();
+        }
+        while matched > 0 && byte != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if byte == pattern[matched] {
+            matched += 1;
+            if matched == m {
+                return Some((*recent_positions.front().unwrap(), pos + 1));
             }
         }
     }
@@ -566,6 +757,60 @@ mod tests {
         let (pos, data, _) = rb.find_and_take_from(b"TARGET", true, Some(watermark));
         assert_eq!(pos, Some(0));
         assert_eq!(data, b"TARGET");
+    }
+
+    #[test]
+    fn find_ignoring_ansi_matches_visible_text_and_preserves_raw_bytes() {
+        let rb = RingBuf::new(128);
+        let raw = b"\x1b[31mAB\x1b[0m\x1b[32mCD\x1b[0m\n";
+        rb.push(raw);
+
+        // 原始字节匹配保持默认行为，不会跨颜色控制序列拼接。
+        assert_eq!(rb.find(b"ABCD"), None);
+        let (pos, data, overflow) = rb.find_and_take_ignoring_ansi(b"ABCD", true, None);
+        assert_eq!(pos, Some(5));
+        assert_eq!(data, b"\x1b[31mAB\x1b[0m\x1b[32mCD");
+        assert_eq!(overflow, 0);
+        // pattern 末字节之后的 reset/newline 仍按 FIFO 语义留给后续读取。
+        assert_eq!(rb.take_all().0, b"\x1b[0m\n");
+    }
+
+    #[test]
+    fn find_ignoring_ansi_skips_osc_and_st_strings() {
+        let rb = RingBuf::new(256);
+        rb.push(b"A\x1b]0;window-title\x07B\x1bPprivate-data\x1b\\C");
+        let (pos, data, _) = rb.find_and_take_ignoring_ansi(b"ABC", true, None);
+        assert_eq!(pos, Some(0));
+        assert_eq!(data, b"A\x1b]0;window-title\x07B\x1bPprivate-data\x1b\\C");
+    }
+
+    #[test]
+    fn find_ignoring_ansi_across_ring_wrap() {
+        let rb = RingBuf::new(16);
+        rb.push(b"0123456789");
+        rb.take_all(); // 让后续 ANSI 数据跨物理环形边界。
+        rb.push(b"\x1b[31mAB\x1b[0mCD");
+        let (pos, data, _) = rb.find_and_take_ignoring_ansi(b"ABCD", true, None);
+        assert_eq!(pos, Some(5));
+        assert_eq!(data, b"\x1b[31mAB\x1b[0mCD");
+    }
+
+    #[test]
+    fn find_ignoring_ansi_respects_new_data_watermark() {
+        let rb = RingBuf::new(128);
+        rb.push(b"\x1b[31mAB\x1b[0m");
+        let watermark = rb.write_position();
+        rb.push(b"\x1b[32mCD\x1b[0m");
+
+        // `new` 不允许历史 AB 与新 CD 跨水位组成一次可见匹配。
+        let (pos, data, _) = rb.find_and_take_ignoring_ansi(b"ABCD", true, Some(watermark));
+        assert_eq!(pos, None);
+        assert!(data.is_empty());
+
+        // 新数据自己的 pattern 可命中，消费仍包含历史原始前缀。
+        let (pos, data, _) = rb.find_and_take_ignoring_ansi(b"CD", true, Some(watermark));
+        assert_eq!(pos, Some(16));
+        assert_eq!(data, b"\x1b[31mAB\x1b[0m\x1b[32mCD");
     }
 
     #[test]

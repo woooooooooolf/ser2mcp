@@ -223,6 +223,19 @@ pub enum MatchScope {
     New,
 }
 
+/// `uart_expect` / `uart_expect_send` 的匹配与消费选项。
+#[derive(Debug, Clone, Copy)]
+pub struct ExpectOptions {
+    /// 总等待超时（毫秒）。
+    pub timeout_ms: u64,
+    /// 命中后是否消费至 pattern 末尾。
+    pub consume: bool,
+    /// 允许参与匹配的缓冲范围。
+    pub match_scope: MatchScope,
+    /// 匹配时是否忽略常见 ANSI 控制序列；原始缓冲与返回数据不变。
+    pub ignore_ansi: bool,
+}
+
 /// 期待匹配返回原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpectReason {
@@ -794,20 +807,10 @@ impl SerialManager {
         port_name: &str,
         data: Option<&[u8]>,
         pattern: &[u8],
-        timeout_ms: u64,
-        consume: bool,
-        match_scope: MatchScope,
+        options: ExpectOptions,
     ) -> Result<ExpectOutcome, String> {
-        self.expect_inner(
-            port_name,
-            pattern,
-            timeout_ms,
-            consume,
-            match_scope,
-            data,
-            None,
-        )
-        .await
+        self.expect_inner(port_name, pattern, options, data, None)
+            .await
     }
 
     /// 等待串口输出中出现 pattern，命中后在同一临界区内**立即**发送 `reply`
@@ -817,32 +820,19 @@ impl SerialManager {
         port_name: &str,
         pattern: &[u8],
         reply: &[u8],
-        timeout_ms: u64,
-        consume: bool,
-        match_scope: MatchScope,
+        options: ExpectOptions,
     ) -> Result<ExpectOutcome, String> {
-        self.expect_inner(
-            port_name,
-            pattern,
-            timeout_ms,
-            consume,
-            match_scope,
-            None,
-            Some(reply),
-        )
-        .await
+        self.expect_inner(port_name, pattern, options, None, Some(reply))
+            .await
     }
 
     /// 内部实现：可选先发送 `send` → 等待 pattern → 命中后可选发送 `reply`。
     /// 整个流程在同一 `io_lock` 临界区内（原子，无并发工具调用插入）。
-    #[allow(clippy::too_many_arguments)]
     async fn expect_inner(
         &self,
         port_name: &str,
         pattern: &[u8],
-        timeout_ms: u64,
-        consume: bool,
-        match_scope: MatchScope,
+        options: ExpectOptions,
         send: Option<&[u8]>,
         reply: Option<&[u8]>,
     ) -> Result<ExpectOutcome, String> {
@@ -857,7 +847,7 @@ impl SerialManager {
 
         // `new` 的水位必须在可选发送之前建立，避免设备在写调用完成前快速返回的
         // 字节被排除；搜索从水位重新开始，不允许历史尾部与新数据头部跨界拼接。
-        let min_position = match match_scope {
+        let min_position = match options.match_scope {
             MatchScope::Buffer => None,
             MatchScope::New => Some(buffer.write_position()),
         };
@@ -867,13 +857,19 @@ impl SerialManager {
             written = write_locked(&port, send)?;
         }
 
-        let timeout = Duration::from_millis(timeout_ms);
+        let timeout = Duration::from_millis(options.timeout_ms);
         let start = Instant::now();
         let (matched, data, overflow_total) = loop {
             // find_and_take 在同一临界区内完成查找与消费（读线程无法插入覆盖）。
-            let (pos, taken, ovf) = match min_position {
-                Some(position) => buffer.find_and_take_from(pattern, consume, Some(position)),
-                None => buffer.find_and_take(pattern, consume),
+            let (pos, taken, ovf) = if options.ignore_ansi {
+                buffer.find_and_take_ignoring_ansi(pattern, options.consume, min_position)
+            } else {
+                match min_position {
+                    Some(position) => {
+                        buffer.find_and_take_from(pattern, options.consume, Some(position))
+                    }
+                    None => buffer.find_and_take(pattern, options.consume),
+                }
             };
             if pos.is_some() {
                 break (true, taken, ovf);
@@ -898,7 +894,7 @@ impl SerialManager {
         // - 超时未命中：只读计算 delta 报告自上次消费以来的数据缺口（帮助识别
         //   "缓冲溢出覆盖了 pattern" 导致的超时），但不更新基线、不消费数据。
         // - 命中但 consume=false：不消费、不更新基线，delta 无意义恒为 0。
-        let (overflow_delta, overflow_total) = if matched && consume {
+        let (overflow_delta, overflow_total) = if matched && options.consume {
             let mut last = last_overflow.lock().unwrap();
             let delta = overflow_total.saturating_sub(*last);
             *last = overflow_total;
