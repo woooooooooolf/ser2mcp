@@ -83,8 +83,8 @@ Agent 应以当前 DSH 版本的配置和目录约定为准，完成 stdio MCP �
 
 仓库内含两个通用 Agent Skills：
 
-- [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md)：工具选择、编码、命令完成判定、缓冲与故障处理
-- [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md)：文件发送授权、估算、接收端准备、EOF、取消和端到端对账
+- [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md)：串口交互工具的完整参数、选择、编码、完成判定、缓冲与故障处理
+- [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md)：文件工具的完整参数、发送授权、估算、接收端准备、EOF、取消和端到端对账
 
 Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等 Agent 可把 `skills/` 挂载到各自的技能目录。
 

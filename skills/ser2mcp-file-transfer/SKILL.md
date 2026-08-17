@@ -38,6 +38,18 @@ description: 使用 ser2mcp 经 UART/COM 串口发送本地文件或固件。用
 5. 必要时单独发送 EOF 或等待按长度接收结束。
 6. 检查返回状态，并在对端核对长度和哈希。
 
+## 完整参数清单
+
+各工具只接受本行列出的字段，参数不会从相似工具继承；未知字段会被拒绝。
+
+| 工具 | 必填字段 | 可选字段 |
+|---|---|---|
+| `uart_send_estimate` | `path` | `mode`, `chunk_size`, `gap_ms`, `baudrate` |
+| `uart_send_file` | `port`, `path` | `mode`, `chunk_size`, `gap_ms`, `max_duration_ms` |
+| `uart_send_cancel` | `port` | 无 |
+
+`uart_send_estimate` 不需要 `port`，其 `baudrate` 只参与耗时估算；`uart_send_file` 使用已打开端口的实际波特率，不接受 `baudrate`。
+
 ## 选择发送参数
 
 | 参数 | 选择规则 |

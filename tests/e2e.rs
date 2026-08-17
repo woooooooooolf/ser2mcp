@@ -81,6 +81,123 @@ async fn e2e_tool_registration_and_errors() {
         ],
         "工具清单不完整"
     );
+
+    // 每个工具的完整字段集合：与 SKILL 参数表保持同一契约，防止相似工具之间
+    // 误继承参数（如把 read 的 idle_ms/max_bytes 传给 expect）。
+    let expected_fields: &[(&str, &[&str])] = &[
+        ("uart_list_ports", &[]),
+        (
+            "uart_open",
+            &[
+                "baudrate",
+                "buffer_size",
+                "data_bits",
+                "discard_on_open",
+                "flow_control",
+                "parity",
+                "port",
+                "read_timeout_ms",
+                "stop_bits",
+            ],
+        ),
+        (
+            "uart_configure",
+            &[
+                "baudrate",
+                "data_bits",
+                "flow_control",
+                "parity",
+                "port",
+                "read_timeout_ms",
+                "stop_bits",
+            ],
+        ),
+        ("uart_write", &["data", "mode", "newline", "port"]),
+        (
+            "uart_read",
+            &["idle_ms", "max_bytes", "port", "read_mode", "timeout_ms"],
+        ),
+        (
+            "uart_exchange",
+            &[
+                "data",
+                "idle_ms",
+                "max_bytes",
+                "mode",
+                "newline",
+                "port",
+                "read_mode",
+                "timeout_ms",
+            ],
+        ),
+        (
+            "uart_expect",
+            &[
+                "consume",
+                "data",
+                "ignore_ansi",
+                "match_scope",
+                "mode",
+                "newline",
+                "pattern",
+                "pattern_mode",
+                "port",
+                "read_mode",
+                "timeout_ms",
+            ],
+        ),
+        (
+            "uart_expect_send",
+            &[
+                "consume",
+                "ignore_ansi",
+                "match_scope",
+                "newline",
+                "pattern",
+                "pattern_mode",
+                "port",
+                "read_mode",
+                "reply",
+                "reply_mode",
+                "timeout_ms",
+            ],
+        ),
+        ("uart_available", &["port"]),
+        ("uart_clear", &["port"]),
+        ("uart_close", &["port"]),
+        (
+            "uart_send_estimate",
+            &["baudrate", "chunk_size", "gap_ms", "mode", "path"],
+        ),
+        (
+            "uart_send_file",
+            &[
+                "chunk_size",
+                "gap_ms",
+                "max_duration_ms",
+                "mode",
+                "path",
+                "port",
+            ],
+        ),
+        ("uart_send_cancel", &["port"]),
+    ];
+    for (name, expected) in expected_fields {
+        let tool = tools
+            .tools
+            .iter()
+            .find(|tool| tool.name == *name)
+            .unwrap_or_else(|| panic!("缺少 {name}"));
+        let mut actual: Vec<&str> = tool
+            .input_schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .map(|properties| properties.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        actual.sort_unstable();
+        assert_eq!(actual, *expected, "{name} 参数字段与完整契约不一致");
+    }
+
     // 工具应带 description 与参数 schema
     let open_tool = tools
         .tools

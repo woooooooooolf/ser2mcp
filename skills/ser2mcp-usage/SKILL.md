@@ -31,6 +31,26 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 | 清空宿主侧未读数据 | `uart_clear` | 清除字节数 |
 | 发送本地文件 | `uart_send_file` | 使用 `ser2mcp-file-transfer` |
 
+## 完整参数清单
+
+各工具只接受本行列出的字段，参数不会从相似工具继承；所有带参工具都会拒绝未知字段。文件相关三个工具的完整参数见 `ser2mcp-file-transfer`。
+
+| 工具 | 必填字段 | 可选字段 |
+|---|---|---|
+| `uart_list_ports` | 无 | 无 |
+| `uart_open` | `port` | `baudrate`, `data_bits`, `parity`, `stop_bits`, `flow_control`, `read_timeout_ms`, `buffer_size`, `discard_on_open` |
+| `uart_configure` | `port` | `baudrate`, `data_bits`, `parity`, `stop_bits`, `flow_control`, `read_timeout_ms` |
+| `uart_write` | `port`, `data` | `mode`, `newline` |
+| `uart_read` | `port` | `idle_ms`, `max_bytes`, `timeout_ms`, `read_mode` |
+| `uart_exchange` | `port`, `data` | `mode`, `newline`, `idle_ms`, `max_bytes`, `timeout_ms`, `read_mode` |
+| `uart_expect` | `port`, `pattern` | `pattern_mode`, `timeout_ms`, `consume`, `match_scope`, `ignore_ansi`, `data`, `mode`, `newline`, `read_mode` |
+| `uart_expect_send` | `port`, `pattern`, `reply` | `pattern_mode`, `reply_mode`, `newline`, `timeout_ms`, `consume`, `match_scope`, `ignore_ansi`, `read_mode` |
+| `uart_available` | `port` | 无 |
+| `uart_clear` | `port` | 无 |
+| `uart_close` | `port` | 无 |
+
+`uart_expect` / `uart_expect_send` 按 pattern 与总超时工作，不接受 `idle_ms` 或 `max_bytes`；需要 idle/字节上限收尾时使用 `uart_read` 或 `uart_exchange`。
+
 ## 执行交互
 
 1. 调用 `uart_list_ports`，从返回结果中确定端口名。

@@ -83,8 +83,8 @@ Every tool except `uart_list_ports` and `uart_send_estimate` requires `port`. Th
 
 The repository includes two portable Agent Skills:
 
-- [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md): tool selection, encoding, command-completion detection, buffering, and recovery
-- [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md): authorization, estimation, peer setup, EOF, cancellation, and end-to-end reconciliation
+- [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md): complete interactive-tool parameters, selection, encoding, completion detection, buffering, and recovery
+- [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md): complete file-tool parameters, authorization, estimation, peer setup, EOF, cancellation, and end-to-end reconciliation
 
 Reasonix installs both SKILLs with the plugin. Claude Code, Codex, and other agents can mount `skills/` into their respective skill directories.
 

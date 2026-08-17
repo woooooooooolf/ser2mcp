@@ -13,6 +13,10 @@
 
 - 修复并发 `uart_clear` 可能落在 idle/max_bytes 判定与实际消费之间，导致读取类工具以非超时原因返回 `bytes=0` 的竞态；空消费现在继续等待至新数据或总超时
 
+### Docs
+
+- 在两个 Agent SKILL 中补全全部 14 个工具各自的必填/可选参数清单，明确参数不会跨工具继承，特别说明 expect 与 read/exchange、estimate 与 send_file 的参数边界
+
 ## [0.8.6] - 2026-08-14
 
 ### Added
