@@ -40,8 +40,7 @@ struct TestClient;
 
 impl ClientHandler for TestClient {}
 
-async fn connect() -> Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>, RmcpError>
-{
+async fn connect() -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>> {
     let bin = env!("CARGO_BIN_EXE_ser2mcp");
     let client = TestClient
         .serve(

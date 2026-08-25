@@ -48,8 +48,7 @@ fn server_bin() -> PathBuf {
         .join(name)
 }
 
-async fn connect() -> Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>, RmcpError>
-{
+async fn connect() -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, TestClient>> {
     let bin = server_bin();
     println!("启动 ser2mcp: {}", bin.display());
     let mut cmd = Command::new(bin);
