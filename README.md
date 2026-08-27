@@ -62,6 +62,12 @@ Windows 路径示例：`"command": "C:\\tools\\ser2mcp.exe"`。日志写入 stde
 
 Agent 应以当前 DSH 版本的配置和目录约定为准，完成 stdio MCP 服务器注册，并安装仓库内的两个 SKILL。
 
+### ZCode 插件市场安装
+
+仓库同时是一个 ZCode 插件市场（`marketplace.json`），插件清单位于 `.zcode-plugin/plugin.json`。在 ZCode 中打开 **设置 → 插件管理 → 发现**，点击 **+** 添加市场，输入 `woooooooooolf/ser2mcp` 后一键安装并启用。
+
+安装后即可获得全部 `uart_*` MCP 工具（以 `mcp__ser2mcp__*` 出现）与两个 SKILL（`ser2mcp:ser2mcp-usage`、`ser2mcp:ser2mcp-file-transfer`），三平台通用：Windows 由启动器解析同名 `ser2mcp.exe`，Linux/macOS 由 `bin/ser2mcp` 脚本选择对应二进制。安装后调用 `uart_list_ports` 验证；返回空数组也表示服务器已正常工作，只是当前没有可枚举串口。离线安装时把本仓库目录作为本地目录市场添加。
+
 ## 工具
 
 | 工具 | 用途 |
@@ -86,7 +92,7 @@ Agent 应以当前 DSH 版本的配置和目录约定为准，完成 stdio MCP �
 - [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md)：串口交互工具的完整参数、选择、编码、完成判定、缓冲与故障处理
 - [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md)：文件工具的完整参数、发送授权、估算、接收端准备、EOF、取消和端到端对账
 
-Reasonix 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等 Agent 可把 `skills/` 挂载到各自的技能目录。
+Reasonix 与 ZCode 安装插件后会同时获得这两个 SKILL。Claude Code、Codex 等 Agent 可把 `skills/` 挂载到各自的技能目录。
 
 最重要的语义边界：
 

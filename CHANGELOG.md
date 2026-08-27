@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 适配 ZCode 插件市场：新增 `.zcode-plugin/plugin.json` 插件清单与仓库根 `marketplace.json` 单插件市场定义，可在 ZCode 中添加 `woooooooooolf/ser2mcp` 为市场后一键安装；MCP 服务器经 `${ZCODE_PLUGIN_ROOT}/bin/ser2mcp` 启动，Windows 自动解析同名 `ser2mcp.exe`，Linux/macOS 由 POSIX 启动脚本选择对应二进制，现有 Reasonix / DSH 接入方式不受影响
+
 ## [0.8.7] - 2026-08-18
 
 ### Added

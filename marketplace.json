@@ -1,0 +1,17 @@
+{
+  "name": "woooooooooolf-plugins",
+  "plugins": [
+    {
+      "name": "ser2mcp",
+      "source": ".",
+      "version": "0.8.7",
+      "description": "UART serial port MCP server plugin: expose local serial ports to AI assistants as standard MCP tools.",
+      "description_i18n": {
+        "en": "UART serial port MCP server plugin: expose local serial ports to AI assistants as standard MCP tools.",
+        "zh-CN": "UART 串口 MCP 服务器插件：把本地串口设备封装成标准 MCP 工具，让 AI 直接读写串口。"
+      },
+      "homepage": "https://github.com/woooooooooolf/ser2mcp",
+      "author": "woooooooooolf"
+    }
+  ]
+}
