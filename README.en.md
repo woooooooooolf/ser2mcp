@@ -64,9 +64,9 @@ The Agent should follow the configuration and directory conventions of the insta
 
 ### ZCode Plugin Marketplace Install
 
-The repository is also a ZCode plugin marketplace (`marketplace.json`), with the plugin manifest at `.zcode-plugin/plugin.json`. In ZCode, open **Settings → Plugin Management → Discover**, click **+** to add a marketplace, enter `woooooooooolf/ser2mcp`, then install and enable the plugin with one click.
+The root `marketplace.json` exposes this repository as a ZCode plugin marketplace, with the plugin manifest at `.zcode-plugin/plugin.json`. In ZCode, open **Settings → Plugins**, choose **Create → Add Marketplace**, enter `woooooooooolf/ser2mcp`, then install and enable `ser2mcp`.
 
-Once installed, all `uart_*` MCP tools (exposed as `mcp__ser2mcp__*`) and both SKILLs (`ser2mcp:ser2mcp-usage`, `ser2mcp:ser2mcp-file-transfer`) become available, working across all three platforms: Windows resolves the matching `ser2mcp.exe`, while Linux/macOS use the `bin/ser2mcp` script to select their platform binary. Verify with `uart_list_ports`; an empty array still means the server is working, just with no enumerable serial ports. For offline installation, add this repository directory as a local directory marketplace.
+Installation loads all `uart_*` MCP tools and both repository SKILLs. Verify with `uart_list_ports`; an empty array still means the server is working, with no serial ports currently enumerable. For offline installation, add the repository directory as a local marketplace source.
 
 ## Tools
 

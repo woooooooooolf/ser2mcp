@@ -1,17 +1,30 @@
 {
   "name": "woooooooooolf-plugins",
+  "description": "ZCode plugin marketplace for ser2mcp.",
+  "description_i18n": {
+    "en": "ZCode plugin marketplace for ser2mcp.",
+    "zh-CN": "ser2mcp 的 ZCode 插件市场。"
+  },
+  "owner": {
+    "name": "woooooooooolf",
+    "url": "https://github.com/woooooooooolf"
+  },
   "plugins": [
     {
       "name": "ser2mcp",
       "source": ".",
       "version": "0.8.7",
-      "description": "UART serial port MCP server plugin: expose local serial ports to AI assistants as standard MCP tools.",
+      "description": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
       "description_i18n": {
-        "en": "UART serial port MCP server plugin: expose local serial ports to AI assistants as standard MCP tools.",
-        "zh-CN": "UART 串口 MCP 服务器插件：把本地串口设备封装成标准 MCP 工具，让 AI 直接读写串口。"
+        "en": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
+        "zh-CN": "UART 串口 MCP 服务器，将本地串口设备封装为标准工具，供 AI 助手直接读写。"
       },
       "homepage": "https://github.com/woooooooooolf/ser2mcp",
-      "author": "woooooooooolf"
+      "author": {
+        "name": "woooooooooolf"
+      },
+      "category": "developer-tools",
+      "keywords": ["uart", "serial", "mcp", "hardware"]
     }
   ]
 }

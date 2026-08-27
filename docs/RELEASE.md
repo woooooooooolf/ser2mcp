@@ -11,12 +11,12 @@
 ```text
 发布准备提交 ── annotated tag vX.Y.Z ── GitHub Release 与远端构建产物
       │
-      └── main 后续提交：同步 Reasonix 版本和 bin/ 预编译二进制，不再打 tag
+      └── main 后续提交：同步插件清单版本和 bin/ 预编译二进制，不再打 tag
 ```
 
 - 只有得到明确发布授权后，才能创建 tag 或 GitHub Release。
 - tag 必须指向“发布准备提交”，不能指向后续的二进制同步提交。
-- `reasonix-plugin.json` 和 `bin/` 在远端 Release 成功前保持上一版本。
+- `reasonix-plugin.json`、`.zcode-plugin/plugin.json`、`marketplace.json` 和 `bin/` 在远端 Release 成功前保持上一版本。
 - 仓库 `bin/` 只能使用对应 tag 的 GitHub Release 资产；本地 `target/release/` 不能替代远端产物。
 - 下载的压缩包必须先通过配套 `.sha256` 校验，再提取和复制二进制。
 - `bin/ser2mcp` 是多平台入口文件，发布同步时不得替换或修改。
@@ -28,7 +28,7 @@
 
 | 对象 | 格式 | 示例 |
 | --- | --- | --- |
-| Cargo / Reasonix 版本 | `X.Y.Z` | `0.8.6` |
+| Cargo / 插件清单版本 | `X.Y.Z` | `0.8.6` |
 | Git tag | `vX.Y.Z`，小写 `v` | `v0.8.6` |
 | Release 标题 | `ser2mcp VX.Y.Z` | `ser2mcp V0.8.6` |
 | 包内版本前缀 | `VX.Y.Z`，大写 `V` | `V0.8.6` |
@@ -43,7 +43,7 @@ Release workflow 当前生成以下六个自定义资产：
 
 工作流会在构建前核对 `RUNNER_ARCH`。架构与名称不一致时必须失败，不能发布错误标注的产物。
 
-每个压缩包包含平台二进制、README、许可证、`skills/` 和 Rust 文档。Release 包不包含 `reasonix-plugin.json` 或仓库 `bin/` 目录。
+每个压缩包包含平台二进制、README、许可证、`skills/` 和 Rust 文档。Release 包不包含 `reasonix-plugin.json`、`.zcode-plugin/plugin.json`、`marketplace.json` 或仓库 `bin/` 目录。
 
 ## 3. 发布前置检查
 
@@ -87,6 +87,8 @@ Release workflow 当前生成以下六个自定义资产：
 此时不得提前修改：
 
 - `reasonix-plugin.json`
+- `.zcode-plugin/plugin.json`
+- `marketplace.json`
 - `bin/ser2mcp.exe`
 - `bin/ser2mcp-linux`
 - `bin/ser2mcp-macos`
@@ -249,8 +251,9 @@ $LauncherHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath 'bin/ser2mcp'
 
 提取压缩包后，将三个平台二进制复制到上表目标，并执行以下更新：
 
-1. 把 `reasonix-plugin.json` 的 `version` 更新为 `X.Y.Z`。
-2. 重建 `bin/SHA256SUMS`，内容顺序和格式保持为：
+1. 把 `reasonix-plugin.json`、`.zcode-plugin/plugin.json` 与 `marketplace.json` 中插件条目的 `version` 同步更新为 `X.Y.Z`。
+2. 核对 `.zcode-plugin/plugin.json` 与 `marketplace.json` 插件条目的 `name`、`version`、`description` 和 `description_i18n` 完全一致；市场顶层 `name` / `owner` 以及插件 `source` 仍指向既有仓库结构。
+3. 重建 `bin/SHA256SUMS`，内容顺序和格式保持为：
 
    ```text
    <sha256> *ser2mcp-linux
@@ -258,7 +261,7 @@ $LauncherHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath 'bin/ser2mcp'
    <sha256> *ser2mcp-macos
    ```
 
-3. 再次计算 `bin/ser2mcp` 哈希，必须与 `$LauncherHashBefore` 相同。
+4. 再次计算 `bin/ser2mcp` 哈希，必须与 `$LauncherHashBefore` 相同。
 
 Windows 可能因正在运行的 `bin/ser2mcp.exe` 而拒绝覆盖。此时先精确确认占用进程的 `ExecutablePath`：
 
@@ -272,6 +275,8 @@ Windows 可能因正在运行的 `bin/ser2mcp.exe` 而拒绝覆盖。此时先�
 至少完成：
 
 - `reasonix-plugin.json` 可解析，版本为 `X.Y.Z`，command 仍为 `bin/ser2mcp`
+- `.zcode-plugin/plugin.json` 与 `marketplace.json` 均可解析，两个插件版本都为 `X.Y.Z`，重复的名称和描述字段一致
+- ZCode MCP command 仍为 `${ZCODE_PLUGIN_ROOT}/bin/ser2mcp`，市场插件 `source` 仍为 `.`
 - `bin/SHA256SUMS` 与三个实际二进制一致
 - Windows 二进制执行 `--version` 输出目标版本
 - Linux 文件为 ELF64 X64，macOS 文件为 Mach-O ARM64，Windows 文件为 PE X64
@@ -280,10 +285,12 @@ Windows 可能因正在运行的 `bin/ser2mcp.exe` 而拒绝覆盖。此时先�
 - `git diff --check` 通过
 - fmt、clippy、全部 feature 测试再次通过
 
-期望此阶段仅修改五个文件：
+期望此阶段仅修改七个文件：
 
 ```text
 reasonix-plugin.json
+.zcode-plugin/plugin.json
+marketplace.json
 bin/SHA256SUMS
 bin/ser2mcp.exe
 bin/ser2mcp-linux
@@ -293,7 +300,7 @@ bin/ser2mcp-macos
 ### 6.5 创建二进制同步提交并等待 CI
 
 ```powershell
-git add -- reasonix-plugin.json bin/SHA256SUMS bin/ser2mcp.exe bin/ser2mcp-linux bin/ser2mcp-macos
+git add -- reasonix-plugin.json .zcode-plugin/plugin.json marketplace.json bin/SHA256SUMS bin/ser2mcp.exe bin/ser2mcp-linux bin/ser2mcp-macos
 git commit -m "构建：更新 VX.Y.Z 预编译二进制"
 git push origin main
 $BinaryCommit = git rev-parse HEAD
@@ -317,7 +324,7 @@ git for-each-ref --format="%(objectname) %(objecttype) %(*objectname) %(*objectt
 - tag 仍指向发布准备提交，不是二进制同步提交
 - Release workflow 和二进制同步后的 CI 均成功
 - Release 非 draft、非 prerelease，六个资产与说明完整
-- 当前仓库 Reasonix 版本、三个 `bin` 二进制和 `bin/SHA256SUMS` 一致
+- 当前仓库 Reasonix / ZCode 插件版本、三个 `bin` 二进制和 `bin/SHA256SUMS` 一致
 
 ## 8. 必须停止并报告的情况
 
@@ -337,13 +344,13 @@ git for-each-ref --format="%(objectname) %(objecttype) %(*objectname) %(*objectt
 
 - [ ] 已取得创建 tag 和 Release 的明确授权
 - [ ] `main` 干净且与 `origin/main` 分歧 `0 0`
-- [ ] Cargo/lock/CHANGELOG 已更新，Reasonix 与 `bin` 尚未提前更新
+- [ ] Cargo/lock/CHANGELOG 已更新，Reasonix / ZCode 插件清单与 `bin` 尚未提前更新
 - [ ] 本地发布门禁通过；相关串口改动已完成硬件验证
 - [ ] 发布准备提交已推送，精确提交的三平台 CI 成功
 - [ ] annotated tag 已推送，peeled commit 正确
 - [ ] Release workflow 成功，说明和六个资产通过验收
 - [ ] 三个远端压缩包的 sidecar SHA-256 校验通过
-- [ ] Reasonix 版本和三个 `bin` 二进制已用远端产物更新
+- [ ] Reasonix / ZCode 插件版本和三个 `bin` 二进制已用远端产物更新，ZCode 两份 JSON 的重复字段一致
 - [ ] `bin/SHA256SUMS` 已重建，`bin/ser2mcp` 未改变
 - [ ] 二进制同步提交已推送，精确提交的三平台 CI 成功
 - [ ] 最终工作区干净，远端分歧 `0 0`
