@@ -62,6 +62,12 @@ Tell the Agent in DSH:
 
 The Agent should follow the configuration and directory conventions of the installed DSH version, register the stdio MCP server, and install both SKILLs from this repository.
 
+### ZCode Plugin Marketplace Install
+
+The root `marketplace.json` exposes this repository as a ZCode plugin marketplace, with the plugin manifest at `.zcode-plugin/plugin.json`. In ZCode, open **Settings → Plugins**, choose **Create → Add Marketplace**, enter `woooooooooolf/ser2mcp`, then install and enable `ser2mcp`.
+
+Installation loads all `uart_*` MCP tools and both repository SKILLs. Verify with `uart_list_ports`; an empty array still means the server is working, with no serial ports currently enumerable. For offline installation, add the repository directory as a local marketplace source.
+
 ## Tools
 
 | Tool | Purpose |
@@ -86,7 +92,7 @@ The repository includes two portable Agent Skills:
 - [`ser2mcp-usage`](skills/ser2mcp-usage/SKILL.md): complete interactive-tool parameters, selection, encoding, completion detection, buffering, and recovery
 - [`ser2mcp-file-transfer`](skills/ser2mcp-file-transfer/SKILL.md): complete file-tool parameters, authorization, estimation, peer setup, EOF, cancellation, and end-to-end reconciliation
 
-Reasonix installs both SKILLs with the plugin. Claude Code, Codex, and other agents can mount `skills/` into their respective skill directories.
+Reasonix and ZCode install both SKILLs with the plugin. Claude Code, Codex, and other agents can mount `skills/` into their respective skill directories.
 
 Important semantic boundaries:
 

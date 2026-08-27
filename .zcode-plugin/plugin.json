@@ -1,0 +1,25 @@
+{
+  "name": "ser2mcp",
+  "version": "0.8.7",
+  "description": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
+  "description_i18n": {
+    "en": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
+    "zh-CN": "UART 串口 MCP 服务器，将本地串口设备封装为标准工具，供 AI 助手直接读写。"
+  },
+  "author": {
+    "name": "woooooooooolf"
+  },
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/woooooooooolf/ser2mcp",
+  "repository": "https://github.com/woooooooooolf/ser2mcp",
+  "keywords": ["uart", "serial", "mcp", "hardware"],
+  "skills": "skills",
+  "mcpServers": {
+    "ser2mcp": {
+      "type": "stdio",
+      "command": "${ZCODE_PLUGIN_ROOT}/bin/ser2mcp",
+      "args": [],
+      "timeoutMs": 90000
+    }
+  }
+}

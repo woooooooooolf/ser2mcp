@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 ZCode 插件清单与仓库市场定义，可从 `woooooooooolf/ser2mcp` 市场安装并自动加载 MCP 服务及两个 SKILL；现有 Reasonix / DSH 接入方式不受影响
+
 ## [0.8.7] - 2026-08-18
 
 ### Added
