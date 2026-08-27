@@ -64,7 +64,7 @@ Agent 应以当前 DSH 版本的配置和目录约定为准，完成 stdio MCP �
 
 ### ZCode 插件市场安装
 
-仓库根目录的 `marketplace.json` 提供 ZCode 插件市场，插件清单位于 `.zcode-plugin/plugin.json`。在 ZCode 中打开 **设置 → 插件**，点击右上角 **创建 → 添加插件市场**，输入 `woooooooooolf/ser2mcp`，然后安装并启用 `ser2mcp`。
+仓库根目录的 `marketplace.json` 提供 ZCode 插件市场，插件清单位于 `.zcode-plugin/plugin.json`。在 ZCode 中打开 **设置 → 插件**，点击右上角 **创建 → 添加插件市场**，输入完整仓库地址 `https://github.com/woooooooooolf/ser2mcp`，然后安装并启用 `ser2mcp`。
 
 安装后会自动加载全部 `uart_*` MCP 工具和仓库内的两个 SKILL。调用 `uart_list_ports` 验证；返回空数组也表示服务器已正常工作，只是当前没有可枚举串口。离线安装时可把仓库目录作为本地市场源。
 
