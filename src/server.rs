@@ -569,21 +569,17 @@ impl Ser2Mcp {
         validate_buffer_size(buffer_size)?;
         let discard_on_open = args.discard_on_open.unwrap_or(true);
 
-        match self
-            .manager
-            .open(
-                &args.port,
-                baudrate,
-                data_bits,
-                parity,
-                stop_bits,
-                flow_control,
-                read_timeout_ms,
-                buffer_size,
-                discard_on_open,
-            )
-            .await
-        {
+        match self.manager.open(
+            &args.port,
+            baudrate,
+            data_bits,
+            parity,
+            stop_bits,
+            flow_control,
+            read_timeout_ms,
+            buffer_size,
+            discard_on_open,
+        ) {
             Ok(()) => {
                 let info = self.manager.available(&args.port);
                 tracing::info!(port = %args.port, baudrate, "串口已打开");

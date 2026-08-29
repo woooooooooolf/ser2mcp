@@ -9,8 +9,8 @@
 //! ```
 //! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
-//! - 打开/写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；关闭一经开始，
-//!   后续排队的普通 I/O/配置会拒绝执行，避免在释放端口前产生新的外部副作用；
+//! - 写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；关闭一经开始，后续
+//!   排队的普通 I/O/配置会拒绝执行，避免在释放端口前产生新的外部副作用；
 //! - available/clear/cancel 不持有该锁，可在文件发送期间查询、清缓冲或请求取消；
 //! - 文件发送每片检查点检测：可选时限、取消标志（uart_send_cancel / uart_close）、
 //!   客户端取消令牌、端口是否仍打开、读线程致命错误（设备物理断开等）。
@@ -251,8 +251,6 @@ pub enum ExpectReason {
 pub struct AvailableInfo {
     /// 串口是否已打开。
     pub open: bool,
-    /// 是否已开始关闭；为 true 时新的普通 I/O/配置会被拒绝。
-    pub closing: bool,
     /// 已打开的串口名（未打开时为 `None`）。
     pub port: Option<String>,
     /// 当前波特率。
@@ -342,7 +340,7 @@ impl SendState {
         p.chunks = 0;
     }
 
-    /// 发送循环退出：记录结束原因并唤醒等待者（`uart_close` 中断路径）。
+    /// 发送循环退出：记录结束原因并唤醒所有等待者（并发 `uart_close` 中断路径）。
     fn finish(&self, reason: &str, sent_bytes: u64, chunks: u64) {
         {
             let mut p = self.progress.lock().unwrap();
@@ -351,7 +349,7 @@ impl SendState {
             p.sent_bytes = sent_bytes;
             p.chunks = chunks;
         }
-        self.done.notify_one();
+        self.done.notify_waiters();
     }
 
     fn update(&self, sent_bytes: u64, chunks: u64) {
@@ -360,11 +358,15 @@ impl SendState {
         p.chunks = chunks;
     }
 
-    /// 等待当前发送退出。仅应在已 `cancel()` 且 `is_active()` 为 true 时调用；
-    /// tokio Notify 会保留已发出的通知（permit），不会错过退出瞬间。
+    /// 等待当前发送退出。先注册通知再检查状态，避免 `finish()` 恰好发生在状态检查
+    /// 与等待注册之间时丢失唤醒；`notify_waiters` 同时支持多个并发 close 等待者。
     async fn wait_done(&self) {
-        while self.is_active() {
-            self.done.notified().await;
+        loop {
+            let notified = self.done.notified();
+            if !self.is_active() {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -407,7 +409,7 @@ struct ActivePort {
     last_overflow: Arc<Mutex<u64>>,
     /// 文件发送会话状态（进度/取消/完成通知）。
     send: Arc<SendState>,
-    /// 关闭已开始；阻止新的文件发送会话在关闭等待期间插入。
+    /// 关闭已开始；阻止新的普通 I/O/配置在关闭等待期间插入。
     closing: AtomicBool,
 }
 
@@ -468,7 +470,7 @@ impl SerialManager {
 
     /// 打开串口并启动事件驱动读线程。同一端口重复打开会报错（先 close 再 open）。
     #[allow(clippy::too_many_arguments)]
-    pub async fn open(
+    pub fn open(
         &self,
         port_name: &str,
         baudrate: u32,
@@ -480,9 +482,6 @@ impl SerialManager {
         buffer_size: usize,
         discard_on_open: bool,
     ) -> Result<(), String> {
-        // open 与 close 共用生命周期锁，避免 close 已移除旧句柄但尚未返回时，
-        // 一个并发 open 抢先插入新会话，让调用方观察到 close 后端口仍打开。
-        let _guard = self.io_lock.lock().await;
         // 同一端口重复打开会报错，避免误覆盖其它会话。
         if self.ports.lock().unwrap().contains_key(port_name) {
             return Err(format!("端口 {port_name} 已打开，请先调用 uart_close"));
@@ -685,21 +684,18 @@ impl SerialManager {
         ct: Option<&CancellationToken>,
     ) -> Result<SendFileOutcome, String> {
         let _guard = self.io_lock.lock().await;
-        let (port, buffer, send, closing) = {
+        let (port, buffer, send) = {
             let ports = self.ports.lock().unwrap();
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
-            (
-                ap.port.clone(),
-                ap.buffer.clone(),
-                ap.send.clone(),
-                ap.closing.load(Ordering::SeqCst),
-            )
+            ap.ensure_io_allowed()?;
+            // 与 closing 检查在同一个端口表临界区内发布 active。这样 close 要么先
+            // 置 closing，令本次发送直接报错；要么随后必定观察到 active 并取消，
+            // 不会落入“检查时未 active、随后开始整次发送”的窗口。
+            ap.send.begin(total_bytes);
+            (ap.port.clone(), ap.buffer.clone(), ap.send.clone())
         };
-        if closing {
-            return Err(format!("端口 {port_name} 正在关闭"));
-        }
         // 文件发送不消费上行缓冲，也不应借用 last_overflow（读取工具的消费基线）
         // 计算增量。直接对环形缓冲的单调累计计数取调用前后快照，才能报告发送期间
         // 已被读线程观察到的覆盖。返回后，仍在串口驱动/线路中的字节可能继续推高
@@ -707,7 +703,6 @@ impl SerialManager {
         let overflow_before = buffer.stats().1;
         let started = Instant::now();
         let max_duration = max_duration_ms.map(Duration::from_millis);
-        send.begin(total_bytes);
         let mut sent_bytes = 0u64;
         let mut chunks_done = 0u64;
         let mut reason = "completed";
@@ -1077,7 +1072,6 @@ impl SerialManager {
         match ports.get(port_name) {
             None => AvailableInfo {
                 open: false,
-                closing: false,
                 port: None,
                 baudrate: None,
                 data_bits: None,
@@ -1097,7 +1091,6 @@ impl SerialManager {
                 let cfg = &ap.config;
                 AvailableInfo {
                     open: true,
-                    closing: ap.closing.load(Ordering::SeqCst),
                     port: Some(ap.port_name.clone()),
                     baudrate: Some(cfg.baudrate),
                     data_bits: Some(data_bits_to_u8(cfg.data_bits)),
@@ -1201,5 +1194,36 @@ fn stop_bits_to_u8(v: StopBits) -> u8 {
     match v {
         StopBits::One => 1,
         StopBits::Two => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_state_wakes_all_close_waiters() {
+        let send = Arc::new(SendState::new());
+        send.begin(1024);
+
+        let waiter_a = {
+            let send = send.clone();
+            tokio::spawn(async move { send.wait_done().await })
+        };
+        let waiter_b = {
+            let send = send.clone();
+            tokio::spawn(async move { send.wait_done().await })
+        };
+
+        // 让两个任务都进入 wait_done；修复前 notify_one 只能唤醒其中一个。
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        send.finish("cancelled", 0, 0);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            waiter_a.await.expect("第一个 close 等待任务不应崩溃");
+            waiter_b.await.expect("第二个 close 等待任务不应崩溃");
+        })
+        .await
+        .expect("所有并发 close 等待者都应被唤醒");
     }
 }

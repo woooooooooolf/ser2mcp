@@ -117,7 +117,7 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - 需要显式结束标记且不能关闭回显：把标记拆开写在命令中，例如等待 `SLEEP-DONE-MARK` 时发送 `sleep 8; printf '%s%s\n' 'SLEEP-DONE-' 'MARK'`。回显不含连续的完整 pattern，实际输出才包含。
 - 需要清除板端当前输入行：仅在确认 tty 为 icanon 时发送 `\x15`（Ctrl+U）；需要中断当前命令时可发送 `\x03`（Ctrl+C）。`uart_clear` 只清宿主缓冲，不清板端状态。
 - 输出缺失或设备拔出：调用 `uart_available` 检查 `read_error` 和 `overflow_total`。
-- `uart_close` 已开始时，`uart_available.closing=true`；新的普通 I/O/配置会报错。`closed=true` 返回后端口保持关闭，`uart_write` 不会隐式重开，继续操作前必须显式 `uart_open`。
+- `uart_close` 已开始时，新的普通 I/O/配置会报错；`closed=true` 返回后端口保持关闭，`uart_write` 不会隐式重开，继续操作前必须显式 `uart_open`。
 
 ## 资源边界
 

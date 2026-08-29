@@ -594,24 +594,9 @@ async fn loopback_send_file_all() {
         call(&close_client, "uart_close", json!({"port": close_port})).await
     });
 
-    // close 在活动写片完成前先同步发布 closing 状态。观察到该状态后发起的新写入
-    // 必须报错，不能抢在最终移除端口前产生外部副作用。
-    let mut saw_closing = false;
-    for _ in 0..200 {
-        let r = call(&client, "uart_available", json!({"port": port}))
-            .await
-            .expect("关闭期间 uart_available 调用失败");
-        let v = r.structured_content.expect("应有结构化返回");
-        if v["closing"] == json!(true) {
-            saw_closing = true;
-            break;
-        }
-        if v["open"] == json!(false) {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(saw_closing, "应在活动文件发送退出前观察到 closing 状态");
+    // 在 close 与 write 并发交叠时，write 要么观察到 closing，要么观察到端口已经
+    // 移除；两种结果都必须报错，不能抢在最终释放前产生外部副作用或隐式重开。
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let r = call(
         &client,
@@ -623,6 +608,16 @@ async fn loopback_send_file_all() {
     assert!(
         r.is_error.unwrap_or(false),
         "关闭开始后的 uart_write 必须拒绝执行: {r:?}"
+    );
+    let error = r
+        .structured_content
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        error.contains("正在关闭") || error.contains("未打开"),
+        "close/write 交叠时应明确报告关闭中或已关闭: {r:?}"
     );
 
     let r = close_task
@@ -650,7 +645,6 @@ async fn loopback_send_file_all() {
         .expect("uart_available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false), "close 后端口应已关闭");
-    assert_eq!(v["closing"], json!(false));
 
     let r = call(
         &client,

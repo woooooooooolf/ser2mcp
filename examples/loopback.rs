@@ -60,9 +60,8 @@ fn list_ports() {
 
 fn loopback(port: &str, baudrate: u32) {
     let mgr = SerialManager::new();
-    let rt = tokio::runtime::Runtime::new().expect("创建运行时失败");
     println!("打开 {port} @ {baudrate} ...");
-    if let Err(e) = rt.block_on(mgr.open(
+    if let Err(e) = mgr.open(
         port,
         baudrate,
         serialport::DataBits::Eight,
@@ -72,7 +71,7 @@ fn loopback(port: &str, baudrate: u32) {
         manager::DEFAULT_READ_TIMEOUT_MS,
         manager::DEFAULT_BUFFER_SIZE,
         true,
-    )) {
+    ) {
         eprintln!("打开失败: {e}");
         std::process::exit(1);
     }
@@ -82,6 +81,7 @@ fn loopback(port: &str, baudrate: u32) {
     let payload: Vec<u8> = (0..=255u8).collect();
     let hex_payload = hex::encode(&payload);
 
+    let rt = tokio::runtime::Runtime::new().expect("创建运行时失败");
     let outcome = rt.block_on(async {
         let _ = mgr.write(port, &payload).await?;
         mgr.read(port, 500, 64 * 1024, 3000).await
