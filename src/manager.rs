@@ -9,8 +9,9 @@
 //! ```
 //! - 读线程只做"读串口 → 写缓冲"，永不阻塞在向 host 发送上；
 //! - 缓冲写满后覆盖最旧数据并累计溢出计数，数据缺口可被上层检测；
-//! - 写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；available/clear/cancel
-//!   不持有该锁，可在文件发送期间查询、清缓冲或请求取消；
+//! - 打开/写/读/交换/配置/期待/文件发送/关闭经 `io_lock` 串行化；关闭一经开始，
+//!   后续排队的普通 I/O/配置会拒绝执行，避免在释放端口前产生新的外部副作用；
+//! - available/clear/cancel 不持有该锁，可在文件发送期间查询、清缓冲或请求取消；
 //! - 文件发送每片检查点检测：可选时限、取消标志（uart_send_cancel / uart_close）、
 //!   客户端取消令牌、端口是否仍打开、读线程致命错误（设备物理断开等）。
 
@@ -250,6 +251,8 @@ pub enum ExpectReason {
 pub struct AvailableInfo {
     /// 串口是否已打开。
     pub open: bool,
+    /// 是否已开始关闭；为 true 时新的普通 I/O/配置会被拒绝。
+    pub closing: bool,
     /// 已打开的串口名（未打开时为 `None`）。
     pub port: Option<String>,
     /// 当前波特率。
@@ -408,6 +411,20 @@ struct ActivePort {
     closing: AtomicBool,
 }
 
+impl ActivePort {
+    /// 关闭开始后，不允许排队的普通 I/O/配置在最终释放句柄前继续执行。
+    fn ensure_io_allowed(&self) -> Result<(), String> {
+        if self.closing.load(Ordering::SeqCst) {
+            Err(format!(
+                "端口 {} 正在关闭，拒绝新的 I/O；请等待 uart_close 返回后再按需 uart_open",
+                self.port_name
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// 串口管理器。
 #[derive(Default)]
 pub struct SerialManager {
@@ -451,7 +468,7 @@ impl SerialManager {
 
     /// 打开串口并启动事件驱动读线程。同一端口重复打开会报错（先 close 再 open）。
     #[allow(clippy::too_many_arguments)]
-    pub fn open(
+    pub async fn open(
         &self,
         port_name: &str,
         baudrate: u32,
@@ -463,6 +480,9 @@ impl SerialManager {
         buffer_size: usize,
         discard_on_open: bool,
     ) -> Result<(), String> {
+        // open 与 close 共用生命周期锁，避免 close 已移除旧句柄但尚未返回时，
+        // 一个并发 open 抢先插入新会话，让调用方观察到 close 后端口仍打开。
+        let _guard = self.io_lock.lock().await;
         // 同一端口重复打开会报错，避免误覆盖其它会话。
         if self.ports.lock().unwrap().contains_key(port_name) {
             return Err(format!("端口 {port_name} 已打开，请先调用 uart_close"));
@@ -557,6 +577,7 @@ impl SerialManager {
         let ap = ports
             .get_mut(port_name)
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+        ap.ensure_io_allowed()?;
         {
             let mut port = ap.port.lock().unwrap();
             if let Some(v) = baudrate {
@@ -600,6 +621,7 @@ impl SerialManager {
         let ap = ports
             .get(port_name)
             .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+        ap.ensure_io_allowed()?;
         write_locked(&ap.port, data)
     }
 
@@ -619,6 +641,7 @@ impl SerialManager {
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            ap.ensure_io_allowed()?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
         // 历史未读数据仍随本次结果返回，但不能让它在新命令响应到达前立即满足
@@ -842,6 +865,7 @@ impl SerialManager {
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            ap.ensure_io_allowed()?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
 
@@ -943,6 +967,7 @@ impl SerialManager {
             let ap = ports
                 .get(port_name)
                 .ok_or_else(|| format!("端口 {port_name} 未打开，请先调用 uart_open"))?;
+            ap.ensure_io_allowed()?;
             (ap.buffer.clone(), ap.last_overflow.clone(), ap.port.clone())
         };
         self.read_locked(
@@ -1052,6 +1077,7 @@ impl SerialManager {
         match ports.get(port_name) {
             None => AvailableInfo {
                 open: false,
+                closing: false,
                 port: None,
                 baudrate: None,
                 data_bits: None,
@@ -1071,6 +1097,7 @@ impl SerialManager {
                 let cfg = &ap.config;
                 AvailableInfo {
                     open: true,
+                    closing: ap.closing.load(Ordering::SeqCst),
                     port: Some(ap.port_name.clone()),
                     baudrate: Some(cfg.baudrate),
                     data_bits: Some(data_bits_to_u8(cfg.data_bits)),

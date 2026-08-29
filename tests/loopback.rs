@@ -155,6 +155,20 @@ async fn wait_for_buffered(client: &rmcp::Peer<rmcp::RoleClient>, port: &str, mi
     panic!("等待回环数据进入缓冲超时");
 }
 
+async fn wait_for_send_active(client: &rmcp::Peer<rmcp::RoleClient>, port: &str) {
+    for _ in 0..100 {
+        let r = call(client, "uart_available", json!({"port": port}))
+            .await
+            .expect("uart_available 调用失败");
+        let v = r.structured_content.expect("应有结构化返回");
+        if v["send"]["active"] == json!(true) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等待文件发送进入 active 状态超时");
+}
+
 #[tokio::test]
 #[ignore = "需要真实回环硬件（TX-RX 短接）"]
 async fn loopback_send_file_all() {
@@ -560,7 +574,7 @@ async fn loopback_send_file_all() {
     assert_eq!(available["send"]["active"], json!(false));
     assert_eq!(available["send"]["last_reason"], json!("duration_limit"));
 
-    // ============ 场景 7：uart_close 并发中断 ============
+    // ============ 场景 7：uart_close 并发中断，close→write 不产生副作用 ============
     let client3 = client.clone();
     let port3 = port.clone();
     let path3 = tmp.path.clone();
@@ -568,13 +582,52 @@ async fn loopback_send_file_all() {
         call(
             &client3,
             "uart_send_file",
-            json!({"port": port3, "path": path3, "chunk_size": 256, "gap_ms": 100}),
+            json!({"port": port3, "path": path3, "chunk_size": 4096, "gap_ms": 60000}),
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let r = call(&client, "uart_close", json!({"port": port}))
+    wait_for_send_active(&client, &port).await;
+
+    let close_client = client.clone();
+    let close_port = port.clone();
+    let close_task = tokio::spawn(async move {
+        call(&close_client, "uart_close", json!({"port": close_port})).await
+    });
+
+    // close 在活动写片完成前先同步发布 closing 状态。观察到该状态后发起的新写入
+    // 必须报错，不能抢在最终移除端口前产生外部副作用。
+    let mut saw_closing = false;
+    for _ in 0..200 {
+        let r = call(&client, "uart_available", json!({"port": port}))
+            .await
+            .expect("关闭期间 uart_available 调用失败");
+        let v = r.structured_content.expect("应有结构化返回");
+        if v["closing"] == json!(true) {
+            saw_closing = true;
+            break;
+        }
+        if v["open"] == json!(false) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(saw_closing, "应在活动文件发送退出前观察到 closing 状态");
+
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": port, "data": "CLOSE-RACE-WRITE", "mode": "text"}),
+    )
+    .await
+    .expect("关闭期间 uart_write 调用失败");
+    assert!(
+        r.is_error.unwrap_or(false),
+        "关闭开始后的 uart_write 必须拒绝执行: {r:?}"
+    );
+
+    let r = close_task
         .await
+        .expect("uart_close task 崩溃")
         .expect("uart_close 调用失败");
     assert_eq!(
         r.structured_content.as_ref().and_then(|v| v.get("closed")),
@@ -597,6 +650,28 @@ async fn loopback_send_file_all() {
         .expect("uart_available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false), "close 后端口应已关闭");
+    assert_eq!(v["closing"], json!(false));
+
+    let r = call(
+        &client,
+        "uart_write",
+        json!({"port": port, "data": "AFTER-CLOSE", "mode": "text"}),
+    )
+    .await
+    .expect("close 返回后的 uart_write 调用失败");
+    assert!(
+        r.is_error.unwrap_or(false),
+        "close 返回后的 uart_write 必须报未打开，不能隐式重开: {r:?}"
+    );
+    assert!(
+        r.structured_content
+            .as_ref()
+            .and_then(|v| v.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("未打开"),
+        "close 返回后的错误应明确说明端口未打开: {r:?}"
+    );
 
     // ============ 场景 8：原始 JSON-RPC 取消通知（notifications/cancelled） ============
     raw_cancelled_notification_test(&port, &tmp.path).await;

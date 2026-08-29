@@ -48,6 +48,7 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 
 核心流程：uart_list_ports → uart_open {port} → 交互 → uart_close {port}。
 - 除 uart_list_ports 和 uart_send_estimate 外，其余工具都需要 port；重复打开前先关闭。
+- uart_list_ports 中相同 USB serial 对应多个 COM 项时，可能是同一芯片暴露的多个串口实例，不能只凭 serial 合并；按端口名与实际功能逐一确认。
 - 二进制使用 mode/read_mode="hex"；终端命令和 uart_expect_send.reply 使用 text 时都应显式指定 newline，读取优先用 read_mode="text-escaped"。
 - 有设备协议定义的响应特征时用 uart_expect。matched=true 只证明 pattern 按所选原始字节/忽略 ANSI 语义命中，不代表事务成功；按终端提示符、AT 状态码、事务标识或二进制帧字段选择锚点。
 - 需要命中即回复时用 uart_expect_send；只有无稳定锚点的短响应才用 uart_exchange 的 idle 收尾。uart_exchange 保留并返回历史缓冲，但会先等到本次写入后至少一批新上行数据，才允许 idle/max_bytes 收尾。
@@ -61,9 +62,11 @@ const INSTRUCTIONS: &str = r##"ser2mcp：UART 串口 MCP 服务器，原样透�
 文件发送：
 - 先确认本地 path 与目标设备均在用户授权范围内；服务端可读取进程有权访问的任意普通文件，不限制目录。
 - 按 uart_send_estimate → 准备对端 → uart_send_file 一次调用 → EOF/按长度结束 → 对端长度和哈希对账执行；不要循环 uart_write。
+- 准备对端时，让它在 tty 模式切换后、紧邻接收命令前输出独立就绪标记；用 uart_expect 命中后再 send_file，不能在接收命令的 uart_write 返回后立刻推流。
 - reason 只表示服务器端结束状态；completed 不代表对端完整接收。base64 的 sent_bytes 包含编码和换行，不能与 raw_bytes 直接比较。
 - send_file 的 overflow 字段是生成返回时的上行缓冲快照，0 不等于最终无溢出；返回后再调用 uart_available / uart_read 确认最新 overflow_total。
-- ser2mcp 不主动发送 EOF。uart_send_file 默认同步阻塞至结束；可显式设置 max_duration_ms 自动止损。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；宿主支持并发或后续请求仍可访问同一服务时，uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
+- ser2mcp 不主动发送 EOF。uart_send_file 默认同步阻塞至结束；长传输或宿主并发能力未知时，默认根据 estimate 与宿主调用超时显式设置 max_duration_ms 自动止损。发送期间普通 I/O/配置/expect 会等待全局 I/O 锁；宿主支持并发或后续请求仍可访问同一服务时，uart_available 可查进度，uart_send_cancel 或目标端口 uart_close 可中止。
+- uart_close 一经开始会拒绝排队的新普通 I/O/配置；返回 closed=true 后端口保持关闭，uart_write 等不会自动重开，必须显式 uart_open。
 
 详细决策与故障处理见 ser2mcp-usage SKILL；文件/固件传输见 ser2mcp-file-transfer SKILL。"##;
 
@@ -272,8 +275,9 @@ pub struct SendFileArgs {
     pub chunk_size: Option<usize>,
     /// 片间间隔（毫秒），默认 0，上限 60000（每片写完 flush 已天然限速到波特率上限）。
     pub gap_ms: Option<u64>,
-    /// 可选自动止损时限（毫秒，必须 >= 1）。默认不限制并保持阻塞等待；达到时限后
-    /// 在下一个分片或间隔检查点停止并返回 reason="duration_limit"。
+    /// 可选自动止损时限（毫秒，必须 >= 1）。默认不限制并保持阻塞等待；长传输或
+    /// 宿主并发能力未知时建议根据 estimate 与宿主调用超时显式设置。达到时限后在
+    /// 下一个分片或间隔检查点停止并返回 reason="duration_limit"。
     pub max_duration_ms: Option<u64>,
 }
 
@@ -510,7 +514,7 @@ impl Ser2Mcp {
 
     /// 枚举本机当前可用的串口。
     #[tool(
-        description = "枚举本机当前可用的串口（名称、类型、USB 描述）。串口被占用时可能不出现。"
+        description = "枚举本机当前可用的串口（名称、类型、USB 描述）。串口被占用时可能不出现；相同 USB serial 对应多个 COM 项时，可能是同一芯片暴露的多个串口实例，不能只凭 serial 合并。"
     )]
     async fn uart_list_ports(&self) -> Result<CallToolResult, McpError> {
         match self.manager.list_ports() {
@@ -565,17 +569,21 @@ impl Ser2Mcp {
         validate_buffer_size(buffer_size)?;
         let discard_on_open = args.discard_on_open.unwrap_or(true);
 
-        match self.manager.open(
-            &args.port,
-            baudrate,
-            data_bits,
-            parity,
-            stop_bits,
-            flow_control,
-            read_timeout_ms,
-            buffer_size,
-            discard_on_open,
-        ) {
+        match self
+            .manager
+            .open(
+                &args.port,
+                baudrate,
+                data_bits,
+                parity,
+                stop_bits,
+                flow_control,
+                read_timeout_ms,
+                buffer_size,
+                discard_on_open,
+            )
+            .await
+        {
             Ok(()) => {
                 let info = self.manager.available(&args.port);
                 tracing::info!(port = %args.port, baudrate, "串口已打开");
@@ -645,7 +653,7 @@ impl Ser2Mcp {
 
     /// 向串口发送数据（只发不等回复），返回实际写入字节数。
     #[tool(
-        description = "向串口发送数据并立即返回（port 必填，不等待回复）；如需发送+读取请用 uart_exchange。"
+        description = "向已打开串口发送数据并立即返回（port 必填，不等待回复，不会自动打开端口）；端口未打开或正在关闭时报错。如需发送+读取请用 uart_exchange。"
     )]
     async fn uart_write(
         &self,
@@ -1147,7 +1155,7 @@ impl Ser2Mcp {
     /// 关闭串口：若目标端口正在发送文件，先请求取消并等待发送退出（最长 30 秒），
     /// 再停止并回收读线程、释放端口句柄。
     #[tool(
-        description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。目标端口正在 uart_send_file 时会先请求取消并等待其退出（最长 30 秒），再关闭端口。"
+        description = "关闭指定串口并释放端口（port 必填；后续可重新 uart_open）。关闭一经开始会拒绝排队的新普通 I/O/配置；目标端口正在 uart_send_file 时会先请求取消并等待其退出（最长 30 秒），再关闭端口。"
     )]
     async fn uart_close(
         &self,

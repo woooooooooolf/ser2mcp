@@ -305,6 +305,7 @@ async fn e2e_tool_registration_and_errors() {
     .expect("available 调用失败");
     let v = r.structured_content.expect("应有结构化返回");
     assert_eq!(v["open"], json!(false));
+    assert_eq!(v["closing"], json!(false));
     assert_eq!(v["pending"], json!(false));
 
     // 4. uart_read 未打开 → 工具级错误（结构化 error）
