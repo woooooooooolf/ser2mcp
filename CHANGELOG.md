@@ -4,12 +4,15 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-30
+
 ### Added
 
 - 新增 ZCode 插件清单与仓库市场定义，可从 `woooooooooolf/ser2mcp` 市场安装并自动加载 MCP 服务及两个 SKILL；现有 Reasonix / DSH 接入方式不受影响
 
 ### Changed
 
+- 项目进入 1.x 稳定维护阶段：现有 14 个 MCP 工具的名称、参数和结构化返回成为兼容性边界；后续不兼容接口变更将通过新的主版本发布
 - 长文件传输在宿主并发能力未知时默认推荐根据估算与宿主超时显式设置 `max_duration_ms`；两个 SKILL 增加 5 步最小 happy path、BusyBox `stty raw -echo`、接收端就绪握手、大输出摘要对账和多串口实例提示
 
 ### Fixed
@@ -264,4 +267,5 @@
 [0.8.5]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.5
 [0.8.6]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.6
 [0.8.7]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.7
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v0.8.7...HEAD
+[1.0.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v1.0.0
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v1.0.0...HEAD
