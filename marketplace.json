@@ -13,7 +13,7 @@
     {
       "name": "ser2mcp",
       "source": ".",
-      "version": "0.8.7",
+      "version": "1.0.0",
       "description": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
       "description_i18n": {
         "en": "UART serial-port MCP server that exposes local serial devices as standard tools for AI assistants.",
