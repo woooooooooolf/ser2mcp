@@ -5,15 +5,27 @@ description: 通过 ser2mcp 的 uart_* MCP 工具操作 UART/COM 串口设备。
 
 # ser2mcp 串口操作
 
+## 5 步最小 happy path
+
+以下 Linux Shell 示例可直接作为起点；把 `COM3`、波特率、命令、行尾和完成 pattern 换成目标设备的实际协议：
+
+1. `uart_list_ports {}`，按端口名和用途选择目标，不只按 USB serial 合并。
+2. `uart_open {port: "COM3", baudrate: 115200}`。
+3. `uart_expect {port: "COM3", data: "printf 'SER2MCP_%s\\n' OK", mode: "text", newline: "lf", pattern: "SER2MCP_OK", pattern_mode: "text", match_scope: "new", read_mode: "text-escaped"}`。
+4. 确认 `matched=true` 且 `overflow_delta=0`；仅当 `pending=true` 时补一次 `uart_read {port: "COM3", read_mode: "text-escaped"}`。
+5. `uart_close {port: "COM3"}`。
+
 ## 必须遵守
 
 - 按 `uart_list_ports → uart_open → 交互 → uart_close` 操作；重复打开同一端口前先关闭。
+- `uart_list_ports` 中相同 USB serial 对应多个 COM 项时，可能是同一芯片暴露的多个串口实例；保留每个端口名并按实际功能逐一确认。
 - 除 `uart_list_ports` 和 `uart_send_estimate` 外，调用时都传 `port`。
 - 一次只发送一条命令，并用设备协议定义的响应特征判断完成；不要用 sleep 盲等。
 - 把 `matched=true` 解释为“pattern 按所选原始字节/忽略 ANSI 语义在匹配范围内命中”，不要直接解释为当前事务成功。
 - 终端命令和 `uart_expect_send.reply` 显式带行尾。通常用 `newline="crlf"`；已知设备只需 LF 时用 `lf`。
 - 把 `reason="idle"` 解释为“字节流暂时静默”，不要解释为命令已完成。
 - 检查每次读取结果的 `overflow_delta`；大于 0 表示数据已被覆盖，当前结果有缺口。
+- 大输出优先让板端重定向到文件，再只读 `wc -c` 与 `sha256sum`（不可用时 `md5sum`）摘要对账；不要把完整内容读进 Agent 上下文。
 - 大文件或固件使用 `ser2mcp-file-transfer`，不要循环调用 `uart_write`。
 
 ## 选择工具
@@ -105,6 +117,7 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - 需要显式结束标记且不能关闭回显：把标记拆开写在命令中，例如等待 `SLEEP-DONE-MARK` 时发送 `sleep 8; printf '%s%s\n' 'SLEEP-DONE-' 'MARK'`。回显不含连续的完整 pattern，实际输出才包含。
 - 需要清除板端当前输入行：仅在确认 tty 为 icanon 时发送 `\x15`（Ctrl+U）；需要中断当前命令时可发送 `\x03`（Ctrl+C）。`uart_clear` 只清宿主缓冲，不清板端状态。
 - 输出缺失或设备拔出：调用 `uart_available` 检查 `read_error` 和 `overflow_total`。
+- `uart_close` 已开始时，新的普通 I/O/配置会报错；`closed=true` 返回后端口保持关闭，`uart_write` 不会隐式重开，继续操作前必须显式 `uart_open`。
 
 ## 资源边界
 
@@ -113,4 +126,4 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 - 所有带参数的工具都拒绝未知字段；拼写错误或把 `buffer_size` 传给 `uart_configure` 会返回参数错误
 - read/exchange/expect `timeout_ms`：最大 `300000`
 - expect pattern：编码后最大 `64 KiB`
-- 普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间会排队。`uart_available` / `uart_clear` 不持有该锁；宿主允许并发或后续任务仍能访问同一服务时，`uart_send_cancel` 可请求取消。
+- 普通 I/O、配置、expect 和 close 共享全局 I/O 锁；文件发送期间会排队。关闭一经开始，排队的新普通 I/O/配置会被拒绝。`uart_available` / `uart_clear` 不持有该锁；宿主允许并发或后续任务仍能访问同一服务时，`uart_send_cancel` 可请求取消。

@@ -106,10 +106,14 @@ Reasonix 与 ZCode 安装插件后会同时获得这两个 SKILL。Claude Code�
 - `uart_expect_send.newline` 作用于 `reply`；终端回复可传 `reply_mode="text"` 和 `newline="crlf"`，不需要把行尾嵌入 reply 文本
 - `uart_expect` 默认只消费到 pattern 结尾；返回的 `pending=true`（等价于 `buffered_bytes > 0`）时补一次 `uart_read`。`pending=false` 仍只是瞬时快照；确实需要 pattern 后的未来输出时继续按协议等待
 - 带参数工具的未知字段会报错，不再静默忽略；`buffer_size` 只能在 `uart_open` 时设置，需调整时先关闭再重新打开端口
+- `uart_list_ports` 中相同 USB serial 的多个 COM 项可能是同一芯片的多个串口实例；不能只凭 serial 合并，应按端口名与功能确认
+- `uart_close` 一经开始会拒绝排队的新普通 I/O/配置；返回后 `uart_write` 不会隐式重开端口，继续操作必须显式 `uart_open`
 - `overflow_delta > 0` 表示环形缓冲已有数据被覆盖，当前读取结果存在缺口
 - `uart_send_file` 的 overflow 是返回时快照；返回后用 `uart_available` / `uart_read` 再确认最新 `overflow_total`，0 不代表最终无溢出
-- `uart_send_file` 默认同步阻塞至结束；可选 `max_duration_ms` 只在显式设置时自动止损并返回 `reason="duration_limit"`，通常仍应根据估算等待完成
+- `uart_send_file` 默认同步阻塞至结束；长传输或宿主并发能力未知时，默认根据估算与宿主调用超时显式设置 `max_duration_ms`，到限返回 `reason="duration_limit"`
+- 文件发送前应让对端在完成 tty 模式切换后、紧邻接收命令前输出独立就绪标记，`uart_expect` 命中后再发送；不要在接收命令的 `uart_write` 返回后立刻推流
 - `uart_send_file` 的 `reason="completed"` 只表示服务器已完成写入；端到端完整性必须用对端长度和解码后哈希确认
+- 大输出或文件对账让板端只返回 `wc -c` 与 `sha256sum`（不可用时 `md5sum`）摘要，不要把完整内容读进 Agent 上下文
 
 ## 验证与开发
 

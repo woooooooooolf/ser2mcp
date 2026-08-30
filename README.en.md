@@ -106,10 +106,14 @@ Important semantic boundaries:
 - `uart_expect_send.newline` applies to `reply`. For a terminal reply, use `reply_mode="text"` with `newline="crlf"` instead of embedding the line ending in the reply text.
 - By default, `uart_expect` consumes only through the end of the pattern. Follow it with `uart_read` when `pending=true` (equivalent to `buffered_bytes > 0`). `pending=false` is still only an instantaneous snapshot; continue waiting according to the device protocol when later output is required.
 - Tools with arguments reject unknown fields instead of silently ignoring them. `buffer_size` can only be set by `uart_open`; close and reopen the port to change it.
+- Multiple COM entries with the same USB serial may be separate UART instances exposed by one chip. Do not merge them by serial alone; confirm each port name and function.
+- Once `uart_close` starts, newly queued ordinary I/O and configuration calls are rejected. `uart_write` never implicitly reopens a port after close; call `uart_open` explicitly before continuing.
 - `overflow_delta > 0` means that ring-buffer data was overwritten, so the current read has a gap.
 - The overflow fields from `uart_send_file` are return-time snapshots. Check the latest `overflow_total` with `uart_available` or `uart_read` afterward; zero is not final proof that no overflow occurred.
-- `uart_send_file` blocks until it finishes by default. Optional `max_duration_ms` is an explicit automatic safeguard that returns `reason="duration_limit"`; normally, wait for the estimate-based transfer duration.
+- `uart_send_file` blocks until it finishes by default. For long transfers or hosts with unknown concurrency support, explicitly set `max_duration_ms` from the estimate and host call timeout; expiry returns `reason="duration_limit"`.
+- Before sending a file, have the peer emit a distinct readiness marker after applying its tty mode and immediately before entering the receiver; wait for it with `uart_expect`. Do not stream immediately after the receiver command's `uart_write` returns.
 - `uart_send_file` returning `reason="completed"` only means that the server finished writing. Confirm end-to-end integrity with peer byte counts and a hash of the decoded content.
+- For large output or file reconciliation, have the peer return only `wc -c` plus `sha256sum` (or `md5sum` when unavailable); do not pull the complete content into the agent context.
 
 ## Validation and Development
 

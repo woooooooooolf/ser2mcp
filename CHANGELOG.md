@@ -8,6 +8,14 @@
 
 - 新增 ZCode 插件清单与仓库市场定义，可从 `woooooooooolf/ser2mcp` 市场安装并自动加载 MCP 服务及两个 SKILL；现有 Reasonix / DSH 接入方式不受影响
 
+### Changed
+
+- 长文件传输在宿主并发能力未知时默认推荐根据估算与宿主超时显式设置 `max_duration_ms`；两个 SKILL 增加 5 步最小 happy path、BusyBox `stty raw -echo`、接收端就绪握手、大输出摘要对账和多串口实例提示
+
+### Fixed
+
+- 修复活动文件发送取消收尾期间，`uart_close` 已开始但排队的新写入/交换等普通 I/O 仍可能抢在最终释放端口前执行的竞态；关闭状态现在同步拒绝新的普通 I/O/配置，多个并发 close 等待者也会全部被唤醒，close 返回后端口不会被 `uart_write` 隐式重开
+
 ## [0.8.7] - 2026-08-18
 
 ### Added
