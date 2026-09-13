@@ -18,7 +18,7 @@ ser2mcp is a local UART serial-port MCP server. It exposes port discovery, confi
 
 ## Install and Connect
 
-Download a prebuilt package for your platform from [Releases](https://github.com/woooooooooolf/ser2mcp/releases), or build from source:
+Download a prebuilt package for your platform from [Releases](https://github.com/woooooooooolf/ser2mcp/releases), or build from source with Rust 1.88 or newer:
 
 ```bash
 git clone https://github.com/woooooooooolf/ser2mcp.git

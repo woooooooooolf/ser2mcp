@@ -2,7 +2,7 @@
 name = "ser2mcp"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "UART serial port MCP server: expose local serial ports to AI assistants as standard MCP tools"
 license = "MIT OR Apache-2.0"
 readme = "README.md"

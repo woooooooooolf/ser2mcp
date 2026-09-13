@@ -18,7 +18,7 @@ ser2mcp 是一个本地 UART 串口 MCP 服务器，把串口枚举、配置、�
 
 ## 安装与接入
 
-可从 [Releases](https://github.com/woooooooooolf/ser2mcp/releases) 下载对应平台的预编译包，也可以从源码构建：
+可从 [Releases](https://github.com/woooooooooolf/ser2mcp/releases) 下载对应平台的预编译包，也可以使用 Rust 1.88 或更高版本从源码构建：
 
 ```bash
 git clone https://github.com/woooooooooolf/ser2mcp.git
