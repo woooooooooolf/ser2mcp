@@ -902,10 +902,8 @@ impl SerialManager {
             }
         };
 
-        if matched {
-            if let Some(reply) = reply {
-                written = write_locked(&port, reply)?;
-            }
+        if matched && let Some(reply) = reply {
+            written = write_locked(&port, reply)?;
         }
 
         // 消费状态：仅"命中且 consume=true"视为消费（更新溢出基线），
@@ -1130,19 +1128,19 @@ impl SerialManager {
                 ap.send.clone()
             })
         };
-        if let Some(send) = send {
-            if send.is_active() {
-                send.cancel();
-                tokio::select! {
-                    _ = send.wait_done() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                        if let Some(ap) = self.ports.lock().unwrap().get(port_name) {
-                            ap.closing.store(false, Ordering::SeqCst);
-                        }
-                        return Err(format!(
-                            "端口 {port_name} 的文件发送未在 30s 内退出，关闭中止"
-                        ));
+        if let Some(send) = send
+            && send.is_active()
+        {
+            send.cancel();
+            tokio::select! {
+                _ = send.wait_done() => {}
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    if let Some(ap) = self.ports.lock().unwrap().get(port_name) {
+                        ap.closing.store(false, Ordering::SeqCst);
                     }
+                    return Err(format!(
+                        "端口 {port_name} 的文件发送未在 30s 内退出，关闭中止"
+                    ));
                 }
             }
         }
