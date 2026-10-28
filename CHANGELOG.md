@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-28
+
 ### Changed
 
 - 更新锁定依赖：rmcp 3.1.4 → 3.7.0、rmcp-macros 3.1.4 → 3.8.0、serialport 4.9.0 → 4.10.1、Tokio 1.53.1 → 1.54.1，以及 tokio-util、serde_json、schemars 和 libc；适配 rmcp 的 `ServerConfig` 接口，保留现有 14 个 MCP 工具的名称、参数和结构化返回
@@ -282,4 +284,5 @@
 [0.8.6]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.6
 [0.8.7]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v0.8.7
 [1.0.0]: https://github.com/woooooooooolf/ser2mcp/releases/tag/v1.0.0
-[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v1.0.0...HEAD
+[1.0.1]: https://github.com/woooooooooolf/ser2mcp/compare/v1.0.0...v1.0.1
+[Unreleased]: https://github.com/woooooooooolf/ser2mcp/compare/v1.0.1...HEAD
