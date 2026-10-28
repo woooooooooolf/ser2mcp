@@ -122,6 +122,7 @@ uart_expect_send {port: "COM3", pattern: "Hit any key", pattern_mode: "text", re
 ## 资源边界
 
 - 波特率：`50..=4000000`
+- ser2mcp 1.0.1 的默认 stdio 传输对单条 JSON-RPC 输入行的上限为 `16 MiB`（按字节计，含 JSON 编码、转义和换行）；超限消息会被丢弃并记录日志，连接保持打开，调用方可能等待超时。不要把大块数据嵌入 `data` / `reply` 等参数；大文件使用 `uart_send_file`。
 - `buffer_size`：`1..=16 MiB`，只能在 `uart_open` 时设置；需调整时先关闭再重新打开端口
 - 所有带参数的工具都拒绝未知字段；拼写错误或把 `buffer_size` 传给 `uart_configure` 会返回参数错误
 - read/exchange/expect `timeout_ms`：最大 `300000`

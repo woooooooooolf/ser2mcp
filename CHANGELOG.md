@@ -4,9 +4,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 更新锁定依赖：rmcp 3.1.4 → 3.7.0、rmcp-macros 3.1.4 → 3.8.0、serialport 4.9.0 → 4.10.1、Tokio 1.53.1 → 1.54.1，以及 tokio-util、serde_json、schemars 和 libc；适配 rmcp 的 `ServerConfig` 接口，保留现有 14 个 MCP 工具的名称、参数和结构化返回
+- 随 rmcp 更新，默认 stdio 传输对单条 JSON-RPC 输入行增加 16 MiB 字节上限（含 JSON 编码、转义和换行）；超限消息被丢弃并记录日志，连接保持打开，调用方可能等待超时。`uart_send_file` 按路径读取并分片发送文件，该限制不是文件总大小上限
+
 ### Fixed
 
 - 将最低 Rust 版本声明订正为 1.88，与当前锁定依赖的要求一致，并同步中英文源码构建说明；不改变二进制行为
+- 纳入 rmcp 的 stdio 输入内存保护、传输 EOF 后待处理请求取消等上游修复，以及相关依赖的维护更新
+
+### Docs
+
+- 在两个自带 SKILL 中补充 stdio 输入消息大小边界、大块参数的规避方式及文件传输适用范围
 
 ## [1.0.0] - 2026-08-30
 
